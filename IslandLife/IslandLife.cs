@@ -4,9 +4,10 @@ using FMODUnity;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization;
 using System.Runtime.Serialization.Formatters.Binary;
+using Steamworks;
 using UnityEngine;
 
 public class IslandLife : Mod
@@ -17,17 +18,15 @@ public class IslandLife : Mod
     {
         harmony = new Harmony("el.islandlife");
         harmony.PatchAll();
-
-
         Debug.Log("[IslandLife] Loaded");
     }
 
     public void OnModUnload()
     {
+        IslandLifeStorage.SaveCurrentWorld();
+
         if (harmony != null)
-        {
             harmony.UnpatchAll(harmony.Id);
-        }
 
         Debug.Log("[IslandLife] Unloaded");
     }
@@ -41,28 +40,15 @@ public class IslandBuildRoot : MonoBehaviour
 
 public class IslandBlockTag : MonoBehaviour
 {
-    public static readonly HashSet<IslandBlockTag> ActiveTags =
-        new HashSet<IslandBlockTag>();
+    public static readonly HashSet<IslandBlockTag> ActiveTags = new HashSet<IslandBlockTag>();
 
     public IslandBuildRoot Root;
     public string RecordId;
-    public Collider[] OriginalPhysicalColliders;
     public GameObject[] CollisionProxies;
 
-    private void OnEnable()
-    {
-        ActiveTags.Add(this);
-    }
-
-    private void OnDisable()
-    {
-        ActiveTags.Remove(this);
-    }
-
-    private void OnDestroy()
-    {
-        ActiveTags.Remove(this);
-    }
+    private void OnEnable() { ActiveTags.Add(this); }
+    private void OnDisable() { ActiveTags.Remove(this); }
+    private void OnDestroy() { ActiveTags.Remove(this); }
 }
 
 public class IslandCollisionProxy : MonoBehaviour
@@ -74,151 +60,89 @@ public class IslandCollisionProxy : MonoBehaviour
 [HarmonyPatch(typeof(BlockCreator), "Update")]
 public static class BlockCreator_Update_IslandLife
 {
-    private static readonly FieldInfo QuadAtCursorField =
-        AccessTools.Field(typeof(BlockCreator), "quadAtCursor");
+    private static readonly FieldInfo QuadAtCursorField = AccessTools.Field(typeof(BlockCreator), "quadAtCursor");
+    private static readonly FieldInfo QuadSurfaceField = AccessTools.Field(typeof(BlockCreator), "quadSurface");
+    private static readonly FieldInfo QuadHitField = AccessTools.Field(typeof(BlockCreator), "quadHit");
+    private static readonly FieldInfo SelectedBuildablePrefabField = AccessTools.Field(typeof(BlockCreator), "selectedBuildablePrefab");
+    private static readonly FieldInfo ColliderPrefabEnablerField = AccessTools.Field(typeof(BlockCreator), "colliderPrefabEnabler");
+    private static readonly FieldInfo EventRefPlaceBlockField = AccessTools.Field(typeof(BlockCreator), "eventRef_placeBlock");
+    private static readonly FieldInfo EventRefCreateBlockField = AccessTools.Field(typeof(BlockCreator), "eventRef_createBlock");
 
-    private static readonly FieldInfo QuadSurfaceField =
-        AccessTools.Field(typeof(BlockCreator), "quadSurface");
-
-    private static readonly FieldInfo QuadHitField =
-        AccessTools.Field(typeof(BlockCreator), "quadHit");
-
-    private static readonly FieldInfo SelectedBuildablePrefabField =
-        AccessTools.Field(typeof(BlockCreator), "selectedBuildablePrefab");
-
-    private static readonly FieldInfo ColliderPrefabEnablerField =
-        AccessTools.Field(typeof(BlockCreator), "colliderPrefabEnabler");
-
-    private static readonly FieldInfo EventRefPlaceBlockField =
-        AccessTools.Field(typeof(BlockCreator), "eventRef_placeBlock");
-
-    private static readonly FieldInfo EventRefCreateBlockField =
-        AccessTools.Field(typeof(BlockCreator), "eventRef_createBlock");
-
-    private static readonly MethodInfo HandleRotationMethod =
-        AccessTools.Method(typeof(BlockCreator), "HandleRotationOfSelectedBlock");
-
-    private static readonly MethodInfo HandleMirroredMethod =
-        AccessTools.Method(typeof(BlockCreator), "HandleMirroredVersion");
-
-    private static readonly MethodInfo SetGhostPositionMethod =
-        AccessTools.Method(typeof(BlockCreator), "SetGhostBlockPositionAndRotation");
+    private static readonly MethodInfo HandleRotationMethod = AccessTools.Method(typeof(BlockCreator), "HandleRotationOfSelectedBlock");
+    private static readonly MethodInfo HandleMirroredMethod = AccessTools.Method(typeof(BlockCreator), "HandleMirroredVersion");
+    private static readonly MethodInfo SetGhostPositionMethod = AccessTools.Method(typeof(BlockCreator), "SetGhostBlockPositionAndRotation");
 
     private const float GroundClearance = 0.001f;
     private const float MinGroundNormalY = 0.55f;
 
     [HarmonyPrefix]
-    public static bool Prefix(
-        BlockCreator __instance,
-        Item_Base ___selectedBuildableItem,
-        Network_Player ___playerNetwork)
+    public static bool Prefix(BlockCreator __instance, Item_Base ___selectedBuildableItem, Network_Player ___playerNetwork)
     {
-        if (__instance == null ||
-            ___playerNetwork == null ||
-            !___playerNetwork.IsLocalPlayer ||
-            ___selectedBuildableItem == null)
-        {
+        if (__instance == null || ___playerNetwork == null || !___playerNetwork.IsLocalPlayer || ___selectedBuildableItem == null)
             return true;
-        }
 
-        if (!Raft_Network.IsHost)
-        {
-            return true;
-        }
-
-        if (CanvasHelper.ActiveMenu != MenuType.None ||
-            MyInput.GetButtonDown("RMB") ||
-            MyInput.GetButtonUp("RMB"))
+        if (CanvasHelper.ActiveMenu != MenuType.None || MyInput.GetButtonDown("RMB") || MyInput.GetButtonUp("RMB"))
         {
             RestoreGhostToRaftPivot(__instance);
             return true;
         }
 
-        ColliderPrefabEnabler colliderEnabler =
-            ColliderPrefabEnablerField.GetValue(__instance)
-                as ColliderPrefabEnabler;
-
+        ColliderPrefabEnabler colliderEnabler = ColliderPrefabEnablerField.GetValue(__instance) as ColliderPrefabEnabler;
         if (colliderEnabler != null)
-        {
             colliderEnabler.ShowCollider();
-        }
 
-        Block selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(__instance)
-                as Block;
-
-        if (__instance.selectedBlock == null ||
-            selectedPrefab == null)
+        if (__instance.selectedBlock == null || SelectedBuildablePrefabField.GetValue(__instance) as Block == null)
         {
-            QuadSurfaceField.SetValue(
-                __instance,
-                null
-            );
-
-            __instance.SetBlockTypeToBuild(
-                ___selectedBuildableItem.UniqueName
-            );
+            QuadSurfaceField.SetValue(__instance, null);
+            __instance.SetBlockTypeToBuild(___selectedBuildableItem.UniqueName);
         }
 
-        Vector3 floorGridPosition;
-        IslandBuildRoot floorGridRoot;
+        Vector3 snapPosition;
+        Quaternion snapRotation;
+        IslandBuildRoot snapRoot;
 
-        if (TryGetFloorGridSnap(
+        if (TryGetGridSnap(
             ___playerNetwork,
             ___selectedBuildableItem,
-            out floorGridPosition,
-            out floorGridRoot))
+            out snapPosition,
+            out snapRotation,
+            out snapRoot))
         {
-            HandleFloorGridSnap(
+            HandleGridSnap(
                 __instance,
                 ___playerNetwork,
                 ___selectedBuildableItem,
-                floorGridRoot,
-                floorGridPosition
-            );
+                snapRoot,
+                snapPosition,
+                snapRotation);
 
             return false;
         }
 
         RaycastHit quadHit;
-        BlockQuad islandQuad;
-        IslandBuildRoot islandRoot;
+        BlockQuad quad;
+        IslandBuildRoot quadRoot;
 
-        if (TryGetIslandQuad(
-            ___playerNetwork,
-            ___selectedBuildableItem,
-            out quadHit,
-            out islandQuad,
-            out islandRoot))
+        if (TryGetIslandQuad(___playerNetwork, ___selectedBuildableItem, out quadHit, out quad, out quadRoot))
         {
-            HandleIslandQuad(
-                __instance,
-                ___playerNetwork,
-                ___selectedBuildableItem,
-                quadHit,
-                islandQuad,
-                islandRoot
-            );
-
+            HandleIslandQuad(__instance, ___playerNetwork, ___selectedBuildableItem, quadHit, quad, quadRoot);
             return false;
         }
 
-        BlockQuad floorSnapQuad;
-        IslandBuildRoot floorSnapRoot;
-
-        if (TryGetFloorToFloorSnap(
+        if (TryGetGridEdgeSnap(
             ___playerNetwork,
             ___selectedBuildableItem,
-            out floorSnapQuad,
-            out floorSnapRoot))
+            out snapPosition,
+            out snapRotation,
+            out snapRoot))
         {
-            HandleFloorToFloor(
+            HandleGridSnap(
                 __instance,
                 ___playerNetwork,
                 ___selectedBuildableItem,
-                floorSnapRoot,
-                floorSnapQuad
-            );
+                snapRoot,
+                snapPosition,
+                snapRotation);
 
             return false;
         }
@@ -232,205 +156,187 @@ public static class BlockCreator_Update_IslandLife
         RaycastHit terrainHit;
         Landmark landmark;
 
-        if (!TryGetIslandTerrain(
-            ___playerNetwork,
-            out terrainHit,
-            out landmark))
+        if (!TryGetIslandTerrain(___playerNetwork, out terrainHit, out landmark))
         {
             RestoreGhostToRaftPivot(__instance);
             return true;
         }
 
-        HandleTerrainBlock(
-            __instance,
-            ___playerNetwork,
-            ___selectedBuildableItem,
-            terrainHit,
-            landmark
-        );
-
+        HandleTerrainBlock(__instance, ___playerNetwork, ___selectedBuildableItem, terrainHit, landmark);
         return false;
     }
 
-    private static void HandleIslandRotation(
-        BlockCreator creator)
+    private static Block EnsureGhost(BlockCreator creator, Item_Base item, DPS dpsType, out Block selectedPrefab)
     {
-        if (creator == null ||
-            creator.selectedBlock == null)
+        selectedPrefab = null;
+        if (creator == null || item == null || item.settings_buildable == null)
+            return null;
+
+        Block requiredPrefab = item.settings_buildable.GetBlockPrefab(dpsType);
+        if (requiredPrefab == null)
+            return null;
+
+        selectedPrefab = SelectedBuildablePrefabField.GetValue(creator) as Block;
+
+        if (creator.selectedBlock == null || selectedPrefab == null ||
+            creator.selectedBlock.dpsType != requiredPrefab.dpsType)
         {
-            return;
+            creator.SetBlockTypeToBuild(requiredPrefab.buildableItem.UniqueName);
+            selectedPrefab = SelectedBuildablePrefabField.GetValue(creator) as Block;
         }
 
-        Block ghost =
-            creator.selectedBlock;
+        Block ghost = creator.selectedBlock;
+        if (ghost != null)
+            DetachGhostFromRaftPivot(ghost);
 
-        Item_Base item =
-            ghost.buildableItem;
+        return ghost;
+    }
 
-        bool freeRotation =
-            item != null &&
-            (Block.IsBlockIndexFoundation(item.UniqueIndex) ||
-             Block.IsBlockIndexFloor(item.UniqueIndex) ||
-             Block.IsBlockIndexRaisedFloor(item.UniqueIndex));
+    private static Block ApplyRotationAndMirror(BlockCreator creator, out Block selectedPrefab)
+    {
+        HandleIslandRotation(creator);
+        HandleMirroredMethod.Invoke(creator, null);
+
+        Block ghost = creator.selectedBlock;
+        selectedPrefab = SelectedBuildablePrefabField.GetValue(creator) as Block;
+
+        if (ghost != null)
+            DetachGhostFromRaftPivot(ghost);
+
+        return ghost;
+    }
+
+    private static Block PrepareGhost(BlockCreator creator, Item_Base item, DPS dpsType, out Block selectedPrefab)
+    {
+        Block ghost = EnsureGhost(creator, item, dpsType, out selectedPrefab);
+        return ghost == null ? null : ApplyRotationAndMirror(creator, out selectedPrefab);
+    }
+
+    private static void HandleIslandRotation(BlockCreator creator)
+    {
+        Block ghost = creator != null ? creator.selectedBlock : null;
+        if (ghost == null)
+            return;
+
+        Item_Base item = ghost.buildableItem;
+        bool freeRotation = item != null &&
+                            (Block.IsBlockIndexFoundation(item.UniqueIndex) ||
+                             Block.IsBlockIndexFloor(item.UniqueIndex) ||
+                             Block.IsBlockIndexRaisedFloor(item.UniqueIndex));
 
         if (!freeRotation)
         {
-            HandleRotationMethod.Invoke(
-                creator,
-                null
-            );
-
+            HandleRotationMethod.Invoke(creator, null);
             return;
         }
 
-        bool oldCanRotateFreely =
-            ghost.canRotateFreely;
-
+        bool oldValue = ghost.canRotateFreely;
         ghost.canRotateFreely = true;
 
         try
         {
-            HandleRotationMethod.Invoke(
-                creator,
-                null
-            );
+            HandleRotationMethod.Invoke(creator, null);
         }
         finally
         {
             if (creator.selectedBlock == ghost)
-            {
-                ghost.canRotateFreely =
-                    oldCanRotateFreely;
-            }
+                ghost.canRotateFreely = oldValue;
         }
     }
 
-    private static void DetachGhostFromRaftPivot(
-        Block ghost)
+    private static void DetachGhostFromRaftPivot(Block ghost)
     {
-        if (ghost == null ||
-            ghost.transform.parent == null)
-        {
+        if (ghost != null && ghost.transform.parent != null)
+            ghost.transform.SetParent(null, true);
+    }
+
+    private static void RestoreGhostToRaftPivot(BlockCreator creator)
+    {
+        if (creator == null || creator.selectedBlock == null)
             return;
-        }
 
-        ghost.transform.SetParent(
-            null,
-            true
-        );
-    }
-
-    private static void RestoreGhostToRaftPivot(
-        BlockCreator creator)
-    {
-        if (creator == null ||
-            creator.selectedBlock == null)
-        {
+        GameManager gameManager = SingletonGeneric<GameManager>.Singleton;
+        if (gameManager == null || gameManager.lockedPivot == null ||
+            creator.selectedBlock.transform.parent == gameManager.lockedPivot)
             return;
-        }
 
-        GameManager gameManager =
-            SingletonGeneric<GameManager>.Singleton;
-
-        if (gameManager == null ||
-            gameManager.lockedPivot == null ||
-            creator.selectedBlock.transform.parent ==
-                gameManager.lockedPivot)
-        {
-            return;
-        }
-
-        creator.selectedBlock.transform.SetParent(
-            gameManager.lockedPivot,
-            true
-        );
+        creator.selectedBlock.transform.SetParent(gameManager.lockedPivot, true);
     }
 
-    private static bool CanStartIslandBuild(Item_Base item)
+    internal static bool CanStartIslandBuild(Item_Base item)
     {
-        if (item == null ||
-            item.settings_buildable == null)
-        {
+        if (item == null || item.settings_buildable == null)
             return false;
-        }
 
-        Block prefab =
-            item.settings_buildable.GetBlockPrefab(DPS.Default);
-
-        if (prefab == null)
-        {
-            return false;
-        }
-
-        return !IsRaftNavigationBlock(
-            item,
-            prefab
-        );
+        Block prefab = item.settings_buildable.GetBlockPrefab(DPS.Default);
+        return prefab != null && !IsRaftNavigationBlock(item, prefab);
     }
 
-    private static bool IsRaftNavigationBlock(
-        Item_Base item,
-        Block prefab)
+    private static bool IsRaftNavigationBlock(Item_Base item, Block prefab)
     {
-        if (item == null ||
-            prefab == null)
-        {
+        if (item == null || prefab == null)
             return false;
-        }
 
         if (prefab.GetComponentInChildren<Sail>(true) != null ||
             prefab.GetComponentInChildren<MotorWheel>(true) != null ||
             prefab.GetComponentInChildren<SteeringWheel>(true) != null ||
             prefab.GetComponentInChildren<Anchor_Stationary>(true) != null)
-        {
             return true;
-        }
 
-        string name =
-            item.UniqueName ?? string.Empty;
-
-        string normalized =
-            name.Replace("_", string.Empty)
-                .Replace("-", string.Empty)
-                .ToLowerInvariant();
+        string normalized = (item.UniqueName ?? string.Empty)
+            .Replace("_", string.Empty)
+            .Replace("-", string.Empty)
+            .ToLowerInvariant();
 
         string[] blockedNames =
         {
-            "engine",
-            "motor",
-            "anchor",
-            "sail",
-            "steeringwheel",
-            "engineswitch",
-            "enginecontrol",
-            "enginecontrols",
-            "rudder"
+            "engine", "motor", "anchor", "sail", "steeringwheel",
+            "engineswitch", "enginecontrol", "enginecontrols", "rudder"
         };
 
         for (int i = 0; i < blockedNames.Length; i++)
-        {
             if (normalized.Contains(blockedNames[i]))
-            {
                 return true;
-            }
-        }
 
         return false;
     }
 
-    private static bool TryGetFloorGridSnap(
+    private static int GetGridKind(Item_Base item)
+    {
+        if (item == null)
+            return 0;
+
+        int index = item.UniqueIndex;
+
+        if (Block.IsBlockIndexFoundation(index) &&
+            !Block.IsBlockIndexFoundationTriangular(index))
+            return 1;
+
+        if (Block.IsBlockIndexFloor(index))
+            return 2;
+
+        if (Block.IsBlockIndexRaisedFloor(index))
+            return 3;
+
+        return 0;
+    }
+
+    private static bool TryGetGridSnap(
         Network_Player player,
         Item_Base item,
         out Vector3 position,
+        out Quaternion rotation,
         out IslandBuildRoot root)
     {
         position = Vector3.zero;
+        rotation = Quaternion.identity;
         root = null;
+
+        int gridKind = GetGridKind(item);
 
         if (player == null ||
             player.CameraTransform == null ||
-            item == null ||
-            !Block.IsBlockIndexFloor(item.UniqueIndex))
+            gridKind == 0)
         {
             return false;
         }
@@ -441,45 +347,34 @@ public static class BlockCreator_Update_IslandLife
         );
 
         float bestScore = float.MaxValue;
-        bool found = false;
 
-        IslandBlockTag[] tags =
-            IslandBlockTag.ActiveTags.ToArray();
-
-        for (int i = 0; i < tags.Length; i++)
+        foreach (IslandBlockTag tag in IslandBlockTag.ActiveTags)
         {
-            IslandBlockTag tag = tags[i];
-
-            if (tag == null ||
-                tag.Root == null)
-            {
+            if (tag == null || tag.Root == null)
                 continue;
-            }
 
-            Block source =
-                tag.GetComponent<Block>();
+            Block source = tag.GetComponent<Block>();
 
             if (source == null ||
                 source.buildableItem == null ||
-                !Block.IsBlockIndexFloor(
-                    source.buildableItem.UniqueIndex))
+                GetGridKind(source.buildableItem) != gridKind)
             {
                 continue;
             }
 
-            float verticalDirection =
-                ray.direction.y;
+            Vector3 up = source.transform.up.normalized;
+            Vector3 right = source.transform.right.normalized;
+            Vector3 forward = source.transform.forward.normalized;
 
-            if (Mathf.Abs(verticalDirection) < 0.001f)
-            {
-                continue;
-            }
+            Plane plane = new Plane(
+                up,
+                source.transform.position
+            );
 
-            float rayDistance =
-                (source.transform.position.y - ray.origin.y) /
-                verticalDirection;
+            float rayDistance;
 
-            if (rayDistance <= 0f ||
+            if (!plane.Raycast(ray, out rayDistance) ||
+                rayDistance <= 0f ||
                 rayDistance > Player.UseDistance * 2f)
             {
                 continue;
@@ -488,526 +383,165 @@ public static class BlockCreator_Update_IslandLife
             Vector3 cursorPoint =
                 ray.GetPoint(rayDistance);
 
-            Vector3 right =
-                source.transform.right;
-
-            Vector3 forward =
-                source.transform.forward;
-
-            right.y = 0f;
-            forward.y = 0f;
-
-            if (right.sqrMagnitude < 0.001f ||
-                forward.sqrMagnitude < 0.001f)
-            {
-                continue;
-            }
-
-            right.Normalize();
-            forward.Normalize();
-
-            Vector3[] directions =
-            {
+            TestGridCandidate(
+                source,
+                source.transform.position + right * BlockCreator.BlockSize,
+                cursorPoint,
                 right,
-                -right,
                 forward,
-                -forward
-            };
+                tag.Root,
+                ref bestScore,
+                ref position,
+                ref rotation,
+                ref root
+            );
 
-            for (int directionIndex = 0;
-                 directionIndex < directions.Length;
-                 directionIndex++)
-            {
-                Vector3 candidate =
-                    source.transform.position +
-                    directions[directionIndex] *
-                    BlockCreator.BlockSize;
+            TestGridCandidate(
+                source,
+                source.transform.position - right * BlockCreator.BlockSize,
+                cursorPoint,
+                right,
+                forward,
+                tag.Root,
+                ref bestScore,
+                ref position,
+                ref rotation,
+                ref root
+            );
 
-                candidate.y =
-                    source.transform.position.y;
+            TestGridCandidate(
+                source,
+                source.transform.position + forward * BlockCreator.BlockSize,
+                cursorPoint,
+                right,
+                forward,
+                tag.Root,
+                ref bestScore,
+                ref position,
+                ref rotation,
+                ref root
+            );
 
-                Vector3 delta =
-                    cursorPoint - candidate;
-
-                delta.y = 0f;
-
-                float localX =
-                    Mathf.Abs(
-                        Vector3.Dot(delta, right)
-                    );
-
-                float localZ =
-                    Mathf.Abs(
-                        Vector3.Dot(delta, forward)
-                    );
-
-                if (localX > BlockCreator.HalfBlockSize ||
-                    localZ > BlockCreator.HalfBlockSize)
-                {
-                    continue;
-                }
-
-                float score =
-                    delta.sqrMagnitude;
-
-                if (score >= bestScore)
-                {
-                    continue;
-                }
-
-                bestScore = score;
-                position = candidate;
-                root = tag.Root;
-                found = true;
-            }
+            TestGridCandidate(
+                source,
+                source.transform.position - forward * BlockCreator.BlockSize,
+                cursorPoint,
+                right,
+                forward,
+                tag.Root,
+                ref bestScore,
+                ref position,
+                ref rotation,
+                ref root
+            );
         }
 
-        return found;
+        return root != null;
+    }
+
+    private static void TestGridCandidate(
+        Block source,
+        Vector3 candidate,
+        Vector3 cursorPoint,
+        Vector3 right,
+        Vector3 forward,
+        IslandBuildRoot candidateRoot,
+        ref float bestScore,
+        ref Vector3 bestPosition,
+        ref Quaternion bestRotation,
+        ref IslandBuildRoot bestRoot)
+    {
+        Vector3 delta =
+            cursorPoint - candidate;
+
+        float localX =
+            Mathf.Abs(
+                Vector3.Dot(delta, right)
+            );
+
+        float localZ =
+            Mathf.Abs(
+                Vector3.Dot(delta, forward)
+            );
+
+        if (localX > BlockCreator.HalfBlockSize ||
+            localZ > BlockCreator.HalfBlockSize)
+        {
+            return;
+        }
+
+        float score =
+            delta.sqrMagnitude;
+
+        if (score >= bestScore)
+            return;
+
+        bestScore = score;
+        bestPosition = candidate;
+        bestRotation = source.transform.rotation;
+        bestRoot = candidateRoot;
     }
 
     private static bool TryGetIslandQuad(
-        Network_Player player,
-        Item_Base item,
-        out RaycastHit hit,
-        out BlockQuad quad,
-        out IslandBuildRoot root)
+        Network_Player player, Item_Base item, out RaycastHit hit, out BlockQuad quad, out IslandBuildRoot root)
     {
         hit = default(RaycastHit);
         quad = null;
         root = null;
 
-        if (player.CameraTransform == null)
-        {
+        if (player == null || player.CameraTransform == null)
             return false;
-        }
 
         RaycastHit[] hits = Physics.RaycastAll(
             player.CameraTransform.position,
             player.CameraTransform.forward,
             Player.UseDistance * 2f,
             LayerMasks.MASK_BuildQuad,
-            QueryTriggerInteraction.UseGlobal
-        )
-        .OrderBy(h => h.distance)
-        .ToArray();
+            QueryTriggerInteraction.UseGlobal);
+
+        float bestDistance = float.MaxValue;
 
         for (int i = 0; i < hits.Length; i++)
         {
-            RaycastHit currentHit = hits[i];
-
-            if (currentHit.transform == null)
-            {
+            RaycastHit current = hits[i];
+            if (current.distance >= bestDistance || current.transform == null)
                 continue;
-            }
 
-            BlockQuad currentQuad =
-                currentHit.transform.GetComponent<BlockQuad>();
+            BlockQuad currentQuad = current.transform.GetComponent<BlockQuad>() ??
+                                    current.transform.GetComponentInParent<BlockQuad>();
 
-            if (currentQuad == null)
-            {
-                currentQuad =
-                    currentHit.transform.GetComponentInParent<BlockQuad>();
-            }
-
-            if (currentQuad == null ||
-                currentQuad.ParentBlock == null)
-            {
+            if (currentQuad == null || currentQuad.ParentBlock == null)
                 continue;
-            }
 
-            IslandBlockTag tag =
-                currentQuad.ParentBlock.GetComponent<IslandBlockTag>();
-
-            if (tag == null || tag.Root == null)
-            {
+            IslandBlockTag tag = currentQuad.ParentBlock.GetComponent<IslandBlockTag>();
+            if (tag == null || tag.Root == null || !currentQuad.AcceptsBlock(item, current.normal))
                 continue;
-            }
 
-            if (!currentQuad.AcceptsBlock(
-                    item,
-                    currentHit.normal))
-            {
-                continue;
-            }
-
-            hit = currentHit;
+            bestDistance = current.distance;
+            hit = current;
             quad = currentQuad;
             root = tag.Root;
-
-            return true;
         }
 
-        return false;
+        return quad != null;
     }
 
-    private static bool TryGetIslandTerrain(
-        Network_Player player,
-        out RaycastHit hit,
-        out Landmark landmark)
-    {
-        hit = default(RaycastHit);
-        landmark = null;
-
-        if (player.CameraTransform == null)
-        {
-            return false;
-        }
-
-        RaycastHit[] hits = Physics.RaycastAll(
-            player.CameraTransform.position,
-            player.CameraTransform.forward,
-            Player.UseDistance * 2f,
-            ~0,
-            QueryTriggerInteraction.Ignore
-        )
-        .OrderBy(h => h.distance)
-        .ToArray();
-
-        for (int i = 0; i < hits.Length; i++)
-        {
-            RaycastHit currentHit = hits[i];
-
-            if (currentHit.collider == null)
-            {
-                continue;
-            }
-
-            if (currentHit.collider.GetComponent<IslandCollisionProxy>() != null ||
-                currentHit.collider.GetComponentInParent<IslandCollisionProxy>() != null)
-            {
-                continue;
-            }
-
-            float minNormalY =
-                IsTerrainAlignHeld()
-                    ? 0.05f
-                    : MinGroundNormalY;
-
-            if (currentHit.normal.y < minNormalY)
-            {
-                continue;
-            }
-
-            if (currentHit.collider.GetComponentInParent<Block>() != null)
-            {
-                continue;
-            }
-
-            Landmark currentLandmark =
-                currentHit.collider.GetComponentInParent<Landmark>();
-
-            if (currentLandmark == null)
-            {
-                continue;
-            }
-
-            hit = currentHit;
-            landmark = currentLandmark;
-            return true;
-        }
-
-        return false;
-    }
-
-    private static void HandleIslandQuad(
-        BlockCreator creator,
+    private static bool TryGetGridEdgeSnap(
         Network_Player player,
         Item_Base item,
-        RaycastHit hit,
-        BlockQuad quad,
-        IslandBuildRoot root)
-    {
-        BlockSurface surface =
-            quad.GetSurfaceFromNormal(hit.normal);
-
-        if (surface == null)
-        {
-            creator.SetGhostBlockVisibility(false);
-            return;
-        }
-
-        DPS dpsType =
-            surface.dpsType;
-
-        Block requiredPrefab =
-            item.settings_buildable.GetBlockPrefab(dpsType);
-
-        if (requiredPrefab == null)
-        {
-            creator.SetGhostBlockVisibility(false);
-            return;
-        }
-
-        Block selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(creator) as Block;
-
-        if (creator.selectedBlock == null ||
-            selectedPrefab == null ||
-            creator.selectedBlock.dpsType != requiredPrefab.dpsType)
-        {
-            creator.SetBlockTypeToBuild(
-                requiredPrefab.buildableItem.UniqueName
-            );
-
-            selectedPrefab =
-                SelectedBuildablePrefabField.GetValue(creator) as Block;
-        }
-
-        Block ghost = creator.selectedBlock;
-        if (ghost == null || selectedPrefab == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        QuadAtCursorField.SetValue(creator, quad);
-        QuadSurfaceField.SetValue(creator, surface);
-        QuadHitField.SetValue(creator, hit);
-
-        HandleIslandRotation(creator);
-        HandleMirroredMethod.Invoke(creator, null);
-
-        ghost = creator.selectedBlock;
-        if (ghost == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        SetGhostPositionMethod.Invoke(creator, null);
-        creator.SetGhostBlockVisibility(true);
-
-        bool canBuild =
-            CanBuildOnIsland(
-                creator,
-                ghost,
-                root
-            );
-
-        SetGhostMaterial(
-            ghost,
-            canBuild
-        );
-
-        if (!canBuild ||
-            !MyInput.GetButtonDown("LMB"))
-        {
-            return;
-        }
-
-        CreateIslandBlock(
-            creator,
-            player,
-            ghost.buildableItem,
-            dpsType,
-            root,
-            ghost.transform.position,
-            ghost.transform.rotation
-        );
-    }
-
-    private static bool CanBuildOnIsland(
-        BlockCreator creator,
-        Block ghost,
-        IslandBuildRoot root)
-    {
-        if (creator == null ||
-            ghost == null ||
-            root == null)
-        {
-            return false;
-        }
-
-        if (!creator.HasEnoughResourcesToBuild(ghost))
-        {
-            return false;
-        }
-
-        IslandBlockTag[] tags =
-            root.GetComponentsInChildren<IslandBlockTag>(true);
-
-        for (int i = 0; i < tags.Length; i++)
-        {
-            IslandBlockTag tag = tags[i];
-
-            if (tag == null)
-            {
-                continue;
-            }
-
-            Block placed =
-                tag.GetComponent<Block>();
-
-            if (placed == null ||
-                placed.buildableItem == null ||
-                ghost.buildableItem == null)
-            {
-                continue;
-            }
-
-            if (placed.buildableItem.UniqueIndex !=
-                ghost.buildableItem.UniqueIndex)
-            {
-                continue;
-            }
-
-            if (Vector3.Distance(
-                    placed.transform.position,
-                    ghost.transform.position) > 0.05f)
-            {
-                continue;
-            }
-
-            bool gridBlock =
-                Block.IsBlockIndexFoundation(
-                    ghost.buildableItem.UniqueIndex) ||
-                Block.IsBlockIndexFloor(
-                    ghost.buildableItem.UniqueIndex) ||
-                Block.IsBlockIndexRaisedFloor(
-                    ghost.buildableItem.UniqueIndex);
-
-            if (gridBlock ||
-                Quaternion.Angle(
-                    placed.transform.rotation,
-                    ghost.transform.rotation) <= 2f)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static void HandleFloorGridSnap(
-        BlockCreator creator,
-        Network_Player player,
-        Item_Base item,
-        IslandBuildRoot root,
-        Vector3 snapPosition)
-    {
-        if (creator == null ||
-            player == null ||
-            item == null ||
-            root == null)
-        {
-            return;
-        }
-
-        Block prefab =
-            item.settings_buildable.GetBlockPrefab(DPS.Default);
-
-        if (prefab == null)
-        {
-            return;
-        }
-
-        Block selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(creator)
-                as Block;
-
-        if (creator.selectedBlock == null ||
-            selectedPrefab == null ||
-            creator.selectedBlock.dpsType != prefab.dpsType)
-        {
-            creator.SetBlockTypeToBuild(
-                prefab.buildableItem.UniqueName
-            );
-
-            selectedPrefab =
-                SelectedBuildablePrefabField.GetValue(creator)
-                    as Block;
-        }
-
-        Block ghost =
-            creator.selectedBlock;
-
-        if (ghost == null ||
-            selectedPrefab == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        HandleIslandRotation(creator);
-
-        HandleMirroredMethod.Invoke(
-            creator,
-            null
-        );
-
-        ghost =
-            creator.selectedBlock;
-
-        selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(creator)
-                as Block;
-
-        if (ghost == null ||
-            selectedPrefab == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        // Центр пола привязывается к выбранной пустой клетке
-        ghost.transform.position =
-            snapPosition;
-
-        ghost.transform.rotation =
-            Quaternion.Euler(
-                0f,
-                selectedPrefab.currentRotationY,
-                0f
-            );
-
-        creator.SetGhostBlockVisibility(true);
-
-        bool canBuild =
-            CanBuildOnIsland(
-                creator,
-                ghost,
-                root
-            );
-
-        SetGhostMaterial(
-            ghost,
-            canBuild
-        );
-
-        if (!canBuild ||
-            !MyInput.GetButtonDown("LMB"))
-        {
-            return;
-        }
-
-        CreateIslandBlock(
-            creator,
-            player,
-            ghost.buildableItem,
-            DPS.Default,
-            root,
-            ghost.transform.position,
-            ghost.transform.rotation
-        );
-    }
-
-    private static bool TryGetFloorToFloorSnap(
-        Network_Player player,
-        Item_Base item,
-        out BlockQuad quad,
+        out Vector3 position,
+        out Quaternion rotation,
         out IslandBuildRoot root)
     {
-        quad = null;
+        position = Vector3.zero;
+        rotation = Quaternion.identity;
         root = null;
+
+        int gridKind = GetGridKind(item);
 
         if (player == null ||
             player.CameraTransform == null ||
-            item == null ||
-            !Block.IsBlockIndexFloor(item.UniqueIndex))
+            gridKind == 0)
         {
             return false;
         }
@@ -1018,40 +552,39 @@ public static class BlockCreator_Update_IslandLife
             Player.UseDistance * 2f,
             LayerMasks.MASK_BuildQuad,
             QueryTriggerInteraction.UseGlobal
-        )
-        .OrderBy(h => h.distance)
-        .ToArray();
+        );
+
+        float bestDistance =
+            float.MaxValue;
 
         for (int i = 0; i < hits.Length; i++)
         {
-            RaycastHit hit =
-                hits[i];
+            RaycastHit hit = hits[i];
 
-            if (hit.transform == null)
+            if (hit.distance >= bestDistance ||
+                hit.transform == null)
             {
                 continue;
             }
 
             BlockQuad currentQuad =
-                hit.transform.GetComponent<BlockQuad>();
+                hit.transform.GetComponent<BlockQuad>() ??
+                hit.transform.GetComponentInParent<BlockQuad>();
 
-            if (currentQuad == null)
-            {
-                currentQuad =
-                    hit.transform.GetComponentInParent<BlockQuad>();
-            }
+            Block source =
+                currentQuad != null
+                    ? currentQuad.ParentBlock
+                    : null;
 
-            if (currentQuad == null ||
-                currentQuad.ParentBlock == null ||
-                currentQuad.ParentBlock.buildableItem == null ||
-                !Block.IsBlockIndexFloor(
-                    currentQuad.ParentBlock.buildableItem.UniqueIndex))
+            if (source == null ||
+                source.buildableItem == null ||
+                GetGridKind(source.buildableItem) != gridKind)
             {
                 continue;
             }
 
             IslandBlockTag tag =
-                currentQuad.ParentBlock.GetComponent<IslandBlockTag>();
+                source.GetComponent<IslandBlockTag>();
 
             if (tag == null ||
                 tag.Root == null)
@@ -1059,633 +592,401 @@ public static class BlockCreator_Update_IslandLife
                 continue;
             }
 
+            Vector3 up =
+                source.transform.up.normalized;
+
             Vector3 delta =
                 currentQuad.transform.position -
-                currentQuad.ParentBlock.transform.position;
+                source.transform.position;
 
-            Vector3 horizontal =
-                new Vector3(
-                    delta.x,
-                    0f,
-                    delta.z
-                );
+            float vertical =
+                Vector3.Dot(delta, up);
 
-            // Берётся только соседняя клетка пола, не верхняя и не центральная точка
-            if (Mathf.Abs(delta.y) > 0.25f ||
-                horizontal.sqrMagnitude < 0.25f)
+            Vector3 planar =
+                delta - up * vertical;
+
+            if (Mathf.Abs(vertical) > 0.25f ||
+                planar.sqrMagnitude < 0.25f)
             {
                 continue;
             }
 
-            quad =
-                currentQuad;
+            position =
+                source.transform.position +
+                planar.normalized *
+                BlockCreator.BlockSize;
+
+            rotation =
+                source.transform.rotation;
 
             root =
                 tag.Root;
 
-            return true;
+            bestDistance =
+                hit.distance;
         }
 
-        return false;
+        return root != null;
     }
 
-    private static void HandleFloorToFloor(
+    private static bool TryGetIslandTerrain(Network_Player player, out RaycastHit hit, out Landmark landmark)
+    {
+        hit = default(RaycastHit);
+        landmark = null;
+
+        if (player == null || player.CameraTransform == null)
+            return false;
+
+        RaycastHit[] hits = Physics.RaycastAll(
+            player.CameraTransform.position,
+            player.CameraTransform.forward,
+            Player.UseDistance * 2f,
+            ~0,
+            QueryTriggerInteraction.Ignore);
+
+        float bestDistance = float.MaxValue;
+        float minNormalY = IsTerrainAlignHeld() ? 0.05f : MinGroundNormalY;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            RaycastHit current = hits[i];
+            if (current.distance >= bestDistance || current.collider == null || current.normal.y < minNormalY)
+                continue;
+
+            if (current.collider.GetComponent<IslandCollisionProxy>() != null ||
+                current.collider.GetComponentInParent<IslandCollisionProxy>() != null ||
+                current.collider.GetComponentInParent<Block>() != null)
+                continue;
+
+            Landmark currentLandmark = current.collider.GetComponentInParent<Landmark>();
+            if (currentLandmark == null)
+                continue;
+
+            bestDistance = current.distance;
+            hit = current;
+            landmark = currentLandmark;
+        }
+
+        return landmark != null;
+    }
+
+    private static void HandleIslandQuad(
+        BlockCreator creator, Network_Player player, Item_Base item,
+        RaycastHit hit, BlockQuad quad, IslandBuildRoot root)
+    {
+        BlockSurface surface = quad.GetSurfaceFromNormal(hit.normal);
+        if (surface == null)
+        {
+            creator.SetGhostBlockVisibility(false);
+            return;
+        }
+
+        Block selectedPrefab;
+        Block ghost = EnsureGhost(creator, item, surface.dpsType, out selectedPrefab);
+        if (ghost == null)
+            return;
+
+        QuadAtCursorField.SetValue(creator, quad);
+        QuadSurfaceField.SetValue(creator, surface);
+        QuadHitField.SetValue(creator, hit);
+
+        ghost = ApplyRotationAndMirror(creator, out selectedPrefab);
+        if (ghost == null)
+            return;
+
+        SetGhostPositionMethod.Invoke(creator, null);
+        PlaceGhost(creator, player, ghost, root, surface.dpsType);
+    }
+
+    private static void HandleGridSnap(
         BlockCreator creator,
         Network_Player player,
         Item_Base item,
         IslandBuildRoot root,
-        BlockQuad snapQuad)
+        Vector3 position,
+        Quaternion sourceRotation)
     {
-        if (creator == null ||
-            player == null ||
-            item == null ||
-            root == null ||
-            snapQuad == null)
-        {
-            return;
-        }
-
-        Block prefab =
-            item.settings_buildable.GetBlockPrefab(DPS.Default);
-
-        if (prefab == null)
-        {
-            return;
-        }
-
-        Block selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(creator) as Block;
-
-        if (creator.selectedBlock == null ||
-            selectedPrefab == null ||
-            creator.selectedBlock.dpsType != prefab.dpsType)
-        {
-            creator.SetBlockTypeToBuild(
-                prefab.buildableItem.UniqueName
-            );
-
-            selectedPrefab =
-                SelectedBuildablePrefabField.GetValue(creator) as Block;
-        }
+        Block selectedPrefab;
 
         Block ghost =
-            creator.selectedBlock;
-
-        if (ghost == null ||
-            selectedPrefab == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        HandleIslandRotation(creator);
-
-        HandleMirroredMethod.Invoke(
-            creator,
-            null
-        );
-
-        ghost =
-            creator.selectedBlock;
-
-        selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(creator) as Block;
-
-        if (ghost == null ||
-            selectedPrefab == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        Block sourceBlock =
-            snapQuad.ParentBlock;
-
-        if (sourceBlock == null)
-        {
-            creator.SetGhostBlockVisibility(false);
-            return;
-        }
-
-        Vector3 direction =
-            snapQuad.transform.position -
-            sourceBlock.transform.position;
-
-        direction.y = 0f;
-
-        if (direction.sqrMagnitude < 0.001f)
-        {
-            creator.SetGhostBlockVisibility(false);
-            return;
-        }
-
-        direction.Normalize();
-
-        // BlockQuad пола расположен у края - центр следующей клетки смещается на полный шаг
-        ghost.transform.position =
-            sourceBlock.transform.position +
-            direction * BlockCreator.BlockSize;
-
-        ghost.transform.position =
-            new Vector3(
-                ghost.transform.position.x,
-                sourceBlock.transform.position.y,
-                ghost.transform.position.z
-            );
-
-        // Пол остаётся горизонтальным, меняется только его yaw
-        ghost.transform.rotation =
-            Quaternion.Euler(
-                0f,
-                selectedPrefab.currentRotationY,
-                0f
-            );
-
-        creator.SetGhostBlockVisibility(true);
-
-        bool canBuild =
-            CanBuildOnIsland(
+            PrepareGhost(
                 creator,
-                ghost,
-                root
+                item,
+                DPS.Default,
+                out selectedPrefab
             );
 
-        SetGhostMaterial(
-            ghost,
-            canBuild
-        );
-
-        if (!canBuild ||
-            !MyInput.GetButtonDown("LMB"))
+        if (ghost == null ||
+            selectedPrefab == null)
         {
             return;
         }
 
-        CreateIslandBlock(
+        ghost.transform.position =
+            position;
+
+        Vector3 sourceUp =
+            sourceRotation * Vector3.up;
+
+        float yawDelta =
+            Mathf.DeltaAngle(
+                sourceRotation.eulerAngles.y,
+                selectedPrefab.currentRotationY
+            );
+
+        ghost.transform.rotation =
+            Quaternion.AngleAxis(
+                yawDelta,
+                sourceUp
+            ) *
+            sourceRotation;
+
+        PlaceGhost(
             creator,
             player,
-            ghost.buildableItem,
-            DPS.Default,
+            ghost,
             root,
-            ghost.transform.position,
-            ghost.transform.rotation
+            DPS.Default
         );
     }
 
-    private static void HandleTerrainBlock(
-        BlockCreator creator,
-        Network_Player player,
-        Item_Base item,
-        RaycastHit hit,
-        Landmark landmark)
+    private static void PlaceGhost(
+        BlockCreator creator, Network_Player player, Block ghost,
+        IslandBuildRoot root, DPS dpsType)
     {
-        Block selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(creator) as Block;
-
-        if (creator.selectedBlock == null ||
-            selectedPrefab == null)
-        {
-            creator.SetBlockTypeToBuild(item.UniqueName);
-
-            selectedPrefab =
-                SelectedBuildablePrefabField.GetValue(creator) as Block;
-        }
-
-        Block ghost = creator.selectedBlock;
-        if (ghost == null || selectedPrefab == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        HandleIslandRotation(creator);
-        HandleMirroredMethod.Invoke(creator, null);
-
-        ghost = creator.selectedBlock;
-        selectedPrefab =
-            SelectedBuildablePrefabField.GetValue(creator) as Block;
-
-        if (ghost == null || selectedPrefab == null)
-        {
-            return;
-        }
-
-        DetachGhostFromRaftPivot(ghost);
-
-        Vector3 baseEuler =
-            selectedPrefab.transform.eulerAngles;
-
-        Quaternion baseRotation =
-            Quaternion.Euler(
-                baseEuler.x,
-                selectedPrefab.currentRotationY,
-                baseEuler.z
-            );
-
-        bool alignToTerrain =
-            IsTerrainAlignHeld();
-
-        Vector3 supportNormal =
-            alignToTerrain
-                ? hit.normal.normalized
-                : Vector3.up;
-
-        if (alignToTerrain)
-        {
-            Vector3 baseUp =
-                baseRotation * Vector3.up;
-
-            Quaternion terrainRotation =
-                Quaternion.FromToRotation(
-                    baseUp,
-                    supportNormal
-                );
-
-            ghost.transform.rotation =
-                terrainRotation * baseRotation;
-        }
-        else
-        {
-            ghost.transform.rotation =
-                baseRotation;
-        }
-
-        ghost.transform.position =
-            hit.point;
-
-        if (item.settings_buildable.Placeable)
-        {
-            // Для Placeable используется штатный offset prefab
-            ghost.transform.position =
-                hit.point +
-                GetPlaceablePivotOffset(
-                    ghost,
-                    supportNormal
-                ) +
-                supportNormal * GroundClearance;
-        }
-        else
-        {
-            float bottomOffset =
-                GetBottomOffsetFromPivot(
-                    ghost,
-                    supportNormal
-                );
-
-            ghost.transform.position =
-                hit.point +
-                supportNormal *
-                (bottomOffset + GroundClearance);
-        }
-
         creator.SetGhostBlockVisibility(true);
 
-        // Земля острова специально соприкасается с первым блоком
-        bool canBuild =
-            creator.HasEnoughResourcesToBuild(ghost);
-
+        bool canBuild = CanBuildOnIsland(creator, ghost, root);
         SetGhostMaterial(ghost, canBuild);
 
         if (!canBuild || !MyInput.GetButtonDown("LMB"))
-        {
             return;
+
+        IslandLifeNetwork.RequestPlace(
+            creator,
+            player,
+            ghost.buildableItem,
+            dpsType,
+            root,
+            ghost.transform.position,
+            ghost.transform.rotation);
+    }
+
+    private static bool CanBuildOnIsland(BlockCreator creator, Block ghost, IslandBuildRoot root)
+    {
+        if (creator == null || ghost == null || root == null || !creator.HasEnoughResourcesToBuild(ghost))
+            return false;
+
+        IslandBlockTag[] tags = root.GetComponentsInChildren<IslandBlockTag>(true);
+
+        for (int i = 0; i < tags.Length; i++)
+        {
+            IslandBlockTag tag = tags[i];
+            Block placed = tag != null ? tag.GetComponent<Block>() : null;
+
+            if (placed == null || placed.buildableItem == null || ghost.buildableItem == null ||
+                placed.buildableItem.UniqueIndex != ghost.buildableItem.UniqueIndex ||
+                Vector3.Distance(placed.transform.position, ghost.transform.position) > 0.05f)
+                continue;
+
+            bool gridBlock = Block.IsBlockIndexFoundation(ghost.buildableItem.UniqueIndex) ||
+                             Block.IsBlockIndexFloor(ghost.buildableItem.UniqueIndex) ||
+                             Block.IsBlockIndexRaisedFloor(ghost.buildableItem.UniqueIndex);
+
+            if (gridBlock || Quaternion.Angle(placed.transform.rotation, ghost.transform.rotation) <= 2f)
+                return false;
         }
 
-        IslandBuildRoot root =
-            GetOrCreateRoot(
-                landmark,
-                ghost.transform.position,
-                ghost.transform.rotation,
-                hit.collider.gameObject.layer
-            );
+        return true;
+    }
 
-        CreateIslandBlock(
+    private static void HandleTerrainBlock(
+        BlockCreator creator, Network_Player player, Item_Base item,
+        RaycastHit hit, Landmark landmark)
+    {
+        Block selectedPrefab;
+        Block ghost = PrepareGhost(creator, item, DPS.Default, out selectedPrefab);
+        if (ghost == null || selectedPrefab == null)
+            return;
+
+        Vector3 baseEuler = selectedPrefab.transform.eulerAngles;
+        Quaternion baseRotation = Quaternion.Euler(baseEuler.x, selectedPrefab.currentRotationY, baseEuler.z);
+
+        bool alignToTerrain = IsTerrainAlignHeld();
+        Vector3 supportNormal = alignToTerrain ? hit.normal.normalized : Vector3.up;
+
+        if (alignToTerrain)
+        {
+            Vector3 baseUp = baseRotation * Vector3.up;
+            ghost.transform.rotation = Quaternion.FromToRotation(baseUp, supportNormal) * baseRotation;
+        }
+        else
+        {
+            ghost.transform.rotation = baseRotation;
+        }
+
+        ghost.transform.position = hit.point;
+
+        if (item.settings_buildable.Placeable)
+        {
+            ghost.transform.position = hit.point +
+                                       GetPlaceablePivotOffset(ghost, supportNormal) +
+                                       supportNormal * GroundClearance;
+        }
+        else
+        {
+            float bottomOffset = GetBottomOffsetFromPivot(ghost, supportNormal);
+            ghost.transform.position = hit.point + supportNormal * (bottomOffset + GroundClearance);
+        }
+
+        creator.SetGhostBlockVisibility(true);
+        bool canBuild = creator.HasEnoughResourcesToBuild(ghost);
+        SetGhostMaterial(ghost, canBuild);
+
+        if (!canBuild || !MyInput.GetButtonDown("LMB"))
+            return;
+
+        IslandBuildRoot root = GetOrCreateRoot(
+            landmark,
+            ghost.transform.position,
+            ghost.transform.rotation,
+            hit.collider.gameObject.layer);
+
+        IslandLifeNetwork.RequestPlace(
             creator,
             player,
             item,
             DPS.Default,
             root,
             ghost.transform.position,
-            ghost.transform.rotation
-        );
+            ghost.transform.rotation);
     }
 
     private static bool IsTerrainAlignHeld()
     {
-        return Input.GetKey(KeyCode.LeftShift) ||
-               Input.GetKey(KeyCode.RightShift);
+        return Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
     }
 
-    private static Vector3 GetPlaceablePivotOffset(
-        Block block,
-        Vector3 supportNormal)
+    private static Vector3 GetPlaceablePivotOffset(Block block, Vector3 supportNormal)
     {
-        if (block == null ||
-            block.pivotOffset == Vector3.zero)
-        {
+        if (block == null || block.pivotOffset == Vector3.zero)
             return Vector3.zero;
-        }
 
         if (supportNormal.sqrMagnitude < 0.001f)
-        {
             supportNormal = Vector3.up;
-        }
 
         supportNormal.Normalize();
 
-        Vector3 right =
-            Vector3.ProjectOnPlane(
-                block.transform.right,
-                supportNormal
-            );
-
+        Vector3 right = Vector3.ProjectOnPlane(block.transform.right, supportNormal);
         if (right.sqrMagnitude < 0.001f)
-        {
-            right =
-                Vector3.ProjectOnPlane(
-                    block.transform.forward,
-                    supportNormal
-                );
-        }
+            right = Vector3.ProjectOnPlane(block.transform.forward, supportNormal);
 
         right.Normalize();
 
-        Vector3 forward =
-            Vector3.Cross(
-                supportNormal,
-                right
-            ).normalized;
-
-        if (Vector3.Dot(
-                forward,
-                block.transform.forward) < 0f)
-        {
+        Vector3 forward = Vector3.Cross(supportNormal, right).normalized;
+        if (Vector3.Dot(forward, block.transform.forward) < 0f)
             forward *= -1f;
-        }
 
-        Vector3 offset =
-            block.pivotOffset;
-
-        return right * offset.x +
-               supportNormal * offset.y +
-               forward * offset.z;
+        Vector3 offset = block.pivotOffset;
+        return right * offset.x + supportNormal * offset.y + forward * offset.z;
     }
 
-    private static float GetBottomOffsetFromPivot(
-        Block block,
-        Vector3 supportNormal)
+    private static float GetBottomOffsetFromPivot(Block block, Vector3 supportNormal)
     {
         if (block == null)
-        {
             return 0f;
-        }
 
         if (supportNormal.sqrMagnitude < 0.001f)
-        {
             supportNormal = Vector3.up;
-        }
 
         supportNormal.Normalize();
 
         bool found = false;
         float minProjection = 0f;
-        Vector3 pivot =
-            block.transform.position;
+        Vector3 pivot = block.transform.position;
 
         if (block.blockColliders != null)
         {
             for (int i = 0; i < block.blockColliders.Length; i++)
             {
-                BoxCollider collider =
-                    block.blockColliders[i];
-
+                BoxCollider collider = block.blockColliders[i];
                 if (collider == null)
-                {
                     continue;
-                }
 
-                AddBoxColliderProjection(
-                    collider,
+                AddBoundsProjection(
+                    new Bounds(collider.center, collider.size),
+                    collider.transform,
                     pivot,
                     supportNormal,
                     ref found,
-                    ref minProjection
-                );
+                    ref minProjection);
             }
         }
 
         if (found)
-        {
-            return Mathf.Max(
-                0f,
-                -minProjection
-            );
-        }
+            return Mathf.Max(0f, -minProjection);
 
-        MeshFilter[] meshFilters =
-            block.GetComponentsInChildren<MeshFilter>(true);
-
+        MeshFilter[] meshFilters = block.GetComponentsInChildren<MeshFilter>(true);
         for (int i = 0; i < meshFilters.Length; i++)
         {
-            MeshFilter filter =
-                meshFilters[i];
-
-            if (filter == null ||
-                filter.sharedMesh == null)
-            {
-                continue;
-            }
-
-            AddBoundsProjection(
-                filter.sharedMesh.bounds,
-                filter.transform,
-                pivot,
-                supportNormal,
-                ref found,
-                ref minProjection
-            );
+            MeshFilter filter = meshFilters[i];
+            if (filter != null && filter.sharedMesh != null)
+                AddBoundsProjection(filter.sharedMesh.bounds, filter.transform, pivot, supportNormal, ref found, ref minProjection);
         }
 
-        SkinnedMeshRenderer[] skinnedRenderers =
-            block.GetComponentsInChildren<SkinnedMeshRenderer>(true);
-
-        for (int i = 0; i < skinnedRenderers.Length; i++)
+        SkinnedMeshRenderer[] skinned = block.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+        for (int i = 0; i < skinned.Length; i++)
         {
-            SkinnedMeshRenderer renderer =
-                skinnedRenderers[i];
-
-            if (renderer == null)
-            {
-                continue;
-            }
-
-            AddBoundsProjection(
-                renderer.localBounds,
-                renderer.transform,
-                pivot,
-                supportNormal,
-                ref found,
-                ref minProjection
-            );
+            SkinnedMeshRenderer renderer = skinned[i];
+            if (renderer != null)
+                AddBoundsProjection(renderer.localBounds, renderer.transform, pivot, supportNormal, ref found, ref minProjection);
         }
 
-        if (!found)
-        {
-            return 0f;
-        }
-
-        return Mathf.Max(
-            0f,
-            -minProjection
-        );
-    }
-
-    private static void AddBoxColliderProjection(
-        BoxCollider collider,
-        Vector3 pivot,
-        Vector3 supportNormal,
-        ref bool found,
-        ref float minProjection)
-    {
-        Vector3 center =
-            collider.center;
-
-        Vector3 extents =
-            collider.size * 0.5f;
-
-        for (int x = -1; x <= 1; x += 2)
-        {
-            for (int y = -1; y <= 1; y += 2)
-            {
-                for (int z = -1; z <= 1; z += 2)
-                {
-                    Vector3 localPoint =
-                        center +
-                        Vector3.Scale(
-                            extents,
-                            new Vector3(x, y, z)
-                        );
-
-                    Vector3 worldPoint =
-                        collider.transform.TransformPoint(
-                            localPoint
-                        );
-
-                    float projection =
-                        Vector3.Dot(
-                            worldPoint - pivot,
-                            supportNormal
-                        );
-
-                    if (!found ||
-                        projection < minProjection)
-                    {
-                        minProjection =
-                            projection;
-
-                        found = true;
-                    }
-                }
-            }
-        }
+        return found ? Mathf.Max(0f, -minProjection) : 0f;
     }
 
     private static void AddBoundsProjection(
-        Bounds bounds,
-        Transform source,
-        Vector3 pivot,
-        Vector3 supportNormal,
-        ref bool found,
-        ref float minProjection)
+        Bounds bounds, Transform source, Vector3 pivot, Vector3 supportNormal,
+        ref bool found, ref float minProjection)
     {
         if (source == null)
-        {
             return;
-        }
 
-        Vector3 center =
-            bounds.center;
-
-        Vector3 extents =
-            bounds.extents;
+        Vector3 center = bounds.center;
+        Vector3 extents = bounds.extents;
 
         for (int x = -1; x <= 1; x += 2)
-        {
             for (int y = -1; y <= 1; y += 2)
-            {
                 for (int z = -1; z <= 1; z += 2)
                 {
-                    Vector3 localPoint =
-                        center +
-                        Vector3.Scale(
-                            extents,
-                            new Vector3(x, y, z)
-                        );
+                    Vector3 localPoint = center + Vector3.Scale(extents, new Vector3(x, y, z));
+                    Vector3 worldPoint = source.TransformPoint(localPoint);
+                    float projection = Vector3.Dot(worldPoint - pivot, supportNormal);
 
-                    Vector3 worldPoint =
-                        source.TransformPoint(
-                            localPoint
-                        );
-
-                    float projection =
-                        Vector3.Dot(
-                            worldPoint - pivot,
-                            supportNormal
-                        );
-
-                    if (!found ||
-                        projection < minProjection)
+                    if (!found || projection < minProjection)
                     {
-                        minProjection =
-                            projection;
-
+                        minProjection = projection;
                         found = true;
                     }
                 }
-            }
-        }
     }
 
     internal static IslandBuildRoot GetOrCreateRoot(
-        Landmark landmark,
-        Vector3 worldPosition,
-        Quaternion worldRotation,
-        int terrainLayer)
+        Landmark landmark, Vector3 worldPosition, Quaternion worldRotation, int terrainLayer)
     {
-        IslandBuildRoot[] roots =
-            landmark.GetComponentsInChildren<IslandBuildRoot>(true);
-
+        IslandBuildRoot[] roots = landmark.GetComponentsInChildren<IslandBuildRoot>(true);
         if (roots != null && roots.Length > 0)
-        {
             return roots[0];
-        }
 
-        GameObject rootObject =
-            new GameObject("IslandBuildRoot");
-
-        rootObject.transform.SetParent(
-            landmark.transform,
-            true
-        );
-
+        GameObject rootObject = new GameObject("IslandBuildRoot");
+        rootObject.transform.SetParent(landmark.transform, true);
         rootObject.transform.SetPositionAndRotation(
             worldPosition,
-            Quaternion.Euler(
-                0f,
-                worldRotation.eulerAngles.y,
-                0f
-            )
-        );
+            Quaternion.Euler(0f, worldRotation.eulerAngles.y, 0f));
 
-        IslandBuildRoot root =
-            rootObject.AddComponent<IslandBuildRoot>();
-
+        IslandBuildRoot root = rootObject.AddComponent<IslandBuildRoot>();
         root.Landmark = landmark;
         root.TerrainLayer = terrainLayer;
-
         return root;
     }
 
@@ -1702,27 +1003,24 @@ public static class BlockCreator_Update_IslandLife
         bool registerRecord = true,
         int restoredHealth = -1,
         int restoredMaxHealth = -1,
-        bool restoredReinforced = false)
+        bool restoredReinforced = false,
+        bool playPlacementSound = true,
+        int hotbarIndexOverride = int.MinValue,
+        uint blockObjectIndex = 0U,
+        uint networkedObjectIndex = 0U,
+        uint networkedBehaviourIndex = 0U)
     {
-        if (creator == null ||
-            player == null ||
-            item == null ||
-            root == null)
-        {
+        if (creator == null || player == null || item == null || root == null)
             return null;
-        }
 
-        Block prefab =
-            item.settings_buildable.GetBlockPrefab(dpsType);
-
+        Block prefab = item.settings_buildable.GetBlockPrefab(dpsType);
         if (prefab == null)
-        {
             return null;
-        }
 
-        creator.SetGhostBlockVisibility(false);
+        if (player.IsLocalPlayer)
+            creator.SetGhostBlockVisibility(false);
 
-        Block block = UnityEngine.Object.Instantiate<Block>(
+        Block block = UnityEngine.Object.Instantiate(
             prefab,
             worldPosition,
             worldRotation,
@@ -1740,25 +1038,31 @@ public static class BlockCreator_Update_IslandLife
                 ? Guid.NewGuid().ToString("N")
                 : recordId;
 
-        Collider[] physicalColliders =
+        BoxCollider[] physicalColliders =
             GetPhysicalColliders(block);
 
-        tag.OriginalPhysicalColliders =
-            physicalColliders;
+        block.blockColliders =
+            new BoxCollider[0];
 
-        // Коллайдеры острова не передаются системе плота
-        block.blockColliders = new BoxCollider[0];
+        if (blockObjectIndex == 0U)
+            blockObjectIndex = SaveAndLoad.GetUniqueObjectIndex();
 
         block.ObjectIndex =
-            SaveAndLoad.GetUniqueObjectIndex();
+            blockObjectIndex;
 
         if (block.networkedBehaviour != null)
         {
+            if (networkedObjectIndex == 0U)
+                networkedObjectIndex = SaveAndLoad.GetUniqueObjectIndex();
+
+            if (networkedBehaviourIndex == 0U)
+                networkedBehaviourIndex = NetworkUpdateManager.GetUniqueBehaviourIndex();
+
             block.networkedBehaviour.ObjectIndex =
-                SaveAndLoad.GetUniqueObjectIndex();
+                networkedObjectIndex;
 
             block.networkedBehaviour.BehaviourIndex =
-                NetworkUpdateManager.GetUniqueBehaviourIndex();
+                networkedBehaviourIndex;
 
             NetworkUpdateManager.AddBehaviour(
                 block.networkedBehaviour
@@ -1767,29 +1071,17 @@ public static class BlockCreator_Update_IslandLife
 
         block.OnFinishedPlacement();
 
-        if (consumeResources)
-        {
-            PlayPlacementSound(
-                creator,
-                item,
-                block.transform.position
-            );
-        }
+        if (playPlacementSound)
+            PlayPlacementSound(creator, item, block.transform.position);
 
         if (restoredMaxHealth >= 0)
-        {
             block.MaxHealth = restoredMaxHealth;
-        }
 
         if (restoredHealth >= 0)
-        {
             block.SetHealth(restoredHealth);
-        }
 
         if (restoredReinforced)
-        {
             block.Reinforced = true;
-        }
 
         tag.CollisionProxies =
             CreateStaticCollisionProxies(
@@ -1799,25 +1091,25 @@ public static class BlockCreator_Update_IslandLife
 
         for (int i = 0; i < physicalColliders.Length; i++)
         {
-            Collider collider = physicalColliders[i];
+            BoxCollider collider =
+                physicalColliders[i];
 
-            if (collider != null)
-            {
-                // Коллайдер остаётся маркером для ColliderPrefabEnabler
-                collider.isTrigger = true;
-                collider.enabled = true;
-            }
+            if (collider == null)
+                continue;
+
+            collider.isTrigger = true;
+            collider.enabled = true;
         }
 
         if (block.occupyingComponent != null)
-        {
             block.occupyingComponent.RestoreToDefaultMaterial();
-        }
 
         int hotbarIndex =
-            player.Inventory.hotbar.GetSelectedSlotIndex();
+            hotbarIndexOverride != int.MinValue
+                ? hotbarIndexOverride
+                : player.Inventory.hotbar.GetSelectedSlotIndex();
 
-        if (consumeResources)
+        if (consumeResources && player.IsLocalPlayer)
         {
             if (item.settings_buildable.Placeable)
             {
@@ -1826,11 +1118,8 @@ public static class BlockCreator_Update_IslandLife
                     Slot slot =
                         player.Inventory.GetSlot(hotbarIndex);
 
-                    if (slot != null &&
-                        !slot.IsEmpty)
-                    {
+                    if (slot != null && !slot.IsEmpty)
                         slot.RemoveItem(1);
-                    }
                 }
             }
             else if (!Cheat.UseGodMode)
@@ -1842,30 +1131,29 @@ public static class BlockCreator_Update_IslandLife
             }
         }
 
-        if (registerRecord)
+        if (registerRecord && Raft_Network.IsHost)
+            IslandLifeStorage.RegisterBlock(block, tag);
+
+        if (consumeResources && player.IsLocalPlayer)
         {
-            IslandLifeStorage.RegisterBlock(
-                block,
-                tag
-            );
-        }
-
-        Debug.Log(
-            "[IslandLife] Блок установлен на острове"
-        );
-
-        if (item.settings_buildable.Placeable)
-        {
-            Slot slot =
-                hotbarIndex >= 0
-                    ? player.Inventory.GetSlot(hotbarIndex)
-                    : null;
-
-            if (slot == null ||
-                slot.IsEmpty)
+            if (item.settings_buildable.Placeable)
             {
-                creator.selectedBlock = null;
-                player.Inventory.hotbar.ReselectCurrentSlot();
+                Slot slot =
+                    hotbarIndex >= 0
+                        ? player.Inventory.GetSlot(hotbarIndex)
+                        : null;
+
+                if (slot == null || slot.IsEmpty)
+                {
+                    creator.selectedBlock = null;
+                    player.Inventory.hotbar.ReselectCurrentSlot();
+                }
+                else
+                {
+                    creator.SetBlockTypeToBuild(
+                        item.UniqueName
+                    );
+                }
             }
             else
             {
@@ -1873,12 +1161,6 @@ public static class BlockCreator_Update_IslandLife
                     item.UniqueName
                 );
             }
-        }
-        else
-        {
-            creator.SetBlockTypeToBuild(
-                item.UniqueName
-            );
         }
 
         return block;
@@ -1890,63 +1172,59 @@ public static class BlockCreator_Update_IslandLife
         Vector3 position)
     {
         if (creator == null ||
-            item == null)
+            item == null ||
+            item.settings_buildable == null)
         {
             return;
         }
 
+        bool placeable =
+            item.settings_buildable.Placeable;
+
         FieldInfo field =
-            item.settings_buildable.Placeable
+            placeable
                 ? EventRefPlaceBlockField
                 : EventRefCreateBlockField;
 
-        if (field == null)
-        {
-            return;
-        }
-
         string eventRef =
-            field.GetValue(creator) as string;
+            field != null
+                ? field.GetValue(creator) as string
+                : null;
 
-        if (string.IsNullOrEmpty(eventRef))
+        if (!placeable &&
+            string.IsNullOrEmpty(eventRef) &&
+            EventRefPlaceBlockField != null)
         {
-            return;
+            eventRef =
+                EventRefPlaceBlockField.GetValue(creator)
+                    as string;
         }
 
-        RuntimeManager.PlayOneShot(
-            eventRef,
-            position
-        );
+        if (!string.IsNullOrEmpty(eventRef))
+        {
+            RuntimeManager.PlayOneShot(
+                eventRef,
+                position
+            );
+        }
     }
 
-    private static Collider[] GetPhysicalColliders(Block block)
+    private static BoxCollider[] GetPhysicalColliders(Block block)
     {
-        if (block == null ||
-            block.blockColliders == null ||
-            block.blockColliders.Length == 0)
-        {
-            return new Collider[0];
-        }
+        if (block == null || block.blockColliders == null || block.blockColliders.Length == 0)
+            return new BoxCollider[0];
 
-        List<Collider> result =
-            new List<Collider>();
+        List<BoxCollider> result = new List<BoxCollider>();
 
         for (int i = 0; i < block.blockColliders.Length; i++)
         {
-            BoxCollider collider =
-                block.blockColliders[i];
-
+            BoxCollider collider = block.blockColliders[i];
             if (collider == null)
-            {
                 continue;
-            }
 
-            // Строительные точки остаются полностью ванильными
             if (collider.GetComponent<BlockQuad>() != null ||
                 collider.GetComponentInParent<BlockQuad>() != null)
-            {
                 continue;
-            }
 
             result.Add(collider);
         }
@@ -1954,274 +1232,683 @@ public static class BlockCreator_Update_IslandLife
         return result.ToArray();
     }
 
-    private static GameObject[] CreateStaticCollisionProxies(
-        Collider[] sourceColliders,
-        IslandBuildRoot root)
+    private static GameObject[] CreateStaticCollisionProxies(BoxCollider[] sourceColliders, IslandBuildRoot root)
     {
-        if (sourceColliders == null ||
-            root == null)
-        {
+        if (sourceColliders == null || root == null)
             return new GameObject[0];
-        }
 
-        List<GameObject> proxies =
-            new List<GameObject>();
+        List<GameObject> proxies = new List<GameObject>();
 
         for (int i = 0; i < sourceColliders.Length; i++)
         {
-            Collider source = sourceColliders[i];
-
+            BoxCollider source = sourceColliders[i];
             if (source == null)
-            {
                 continue;
-            }
 
-            GameObject proxy =
-                CreateCollisionProxy(source, root);
+            GameObject proxy = new GameObject("IslandStaticCollision");
+            proxy.layer = root.TerrainLayer;
+            proxy.transform.SetParent(root.transform, false);
+            proxy.transform.position = source.transform.position;
+            proxy.transform.rotation = source.transform.rotation;
+            proxy.transform.localScale = RelativeScale(source.transform.lossyScale, root.transform.lossyScale);
 
-            if (proxy != null)
-            {
-                proxies.Add(proxy);
-            }
+            IslandCollisionProxy marker = proxy.AddComponent<IslandCollisionProxy>();
+            marker.Root = root;
+            marker.SourceBlock = source.GetComponentInParent<Block>();
+
+            BoxCollider collider = proxy.AddComponent<BoxCollider>();
+            collider.center = source.center;
+            collider.size = source.size;
+            collider.sharedMaterial = source.sharedMaterial;
+
+            proxies.Add(proxy);
         }
 
         return proxies.ToArray();
     }
 
-    private static GameObject CreateCollisionProxy(
-        Collider source,
-        IslandBuildRoot root)
+    private static Vector3 RelativeScale(Vector3 value, Vector3 parent)
     {
-        GameObject proxy =
-            new GameObject("IslandStaticCollision");
-
-        proxy.layer = root.TerrainLayer;
-
-        IslandCollisionProxy marker =
-            proxy.AddComponent<IslandCollisionProxy>();
-
-        marker.Root = root;
-        marker.SourceBlock =
-            source.GetComponentInParent<Block>();
-
-        proxy.transform.SetParent(
-            root.transform,
-            false
-        );
-
-        proxy.transform.position =
-            source.transform.position;
-
-        proxy.transform.rotation =
-            source.transform.rotation;
-
-        proxy.transform.localScale =
-            GetRelativeScale(
-                source.transform.lossyScale,
-                root.transform.lossyScale
-            );
-
-        BoxCollider sourceBox =
-            source as BoxCollider;
-
-        if (sourceBox != null)
-        {
-            BoxCollider collider =
-                proxy.AddComponent<BoxCollider>();
-
-            collider.center = sourceBox.center;
-            collider.size = sourceBox.size;
-            collider.sharedMaterial =
-                sourceBox.sharedMaterial;
-
-            return proxy;
-        }
-
-        SphereCollider sourceSphere =
-            source as SphereCollider;
-
-        if (sourceSphere != null)
-        {
-            SphereCollider collider =
-                proxy.AddComponent<SphereCollider>();
-
-            collider.center = sourceSphere.center;
-            collider.radius = sourceSphere.radius;
-            collider.sharedMaterial =
-                sourceSphere.sharedMaterial;
-
-            return proxy;
-        }
-
-        CapsuleCollider sourceCapsule =
-            source as CapsuleCollider;
-
-        if (sourceCapsule != null)
-        {
-            CapsuleCollider collider =
-                proxy.AddComponent<CapsuleCollider>();
-
-            collider.center = sourceCapsule.center;
-            collider.radius = sourceCapsule.radius;
-            collider.height = sourceCapsule.height;
-            collider.direction = sourceCapsule.direction;
-            collider.sharedMaterial =
-                sourceCapsule.sharedMaterial;
-
-            return proxy;
-        }
-
-        MeshCollider sourceMesh =
-            source as MeshCollider;
-
-        if (sourceMesh != null)
-        {
-            MeshCollider collider =
-                proxy.AddComponent<MeshCollider>();
-
-            collider.sharedMesh =
-                sourceMesh.sharedMesh;
-
-            collider.convex =
-                sourceMesh.convex;
-
-            collider.sharedMaterial =
-                sourceMesh.sharedMaterial;
-
-            return proxy;
-        }
-
-        UnityEngine.Object.Destroy(proxy);
-        return null;
+        return new Vector3(SafeDivide(value.x, parent.x), SafeDivide(value.y, parent.y), SafeDivide(value.z, parent.z));
     }
 
-    private static Vector3 GetRelativeScale(
-        Vector3 worldScale,
-        Vector3 parentScale)
+    private static float SafeDivide(float value, float divisor)
     {
-        return new Vector3(
-            SafeDivide(worldScale.x, parentScale.x),
-            SafeDivide(worldScale.y, parentScale.y),
-            SafeDivide(worldScale.z, parentScale.z)
-        );
+        return Mathf.Abs(divisor) < 0.0001f ? value : value / divisor;
     }
 
-    private static float SafeDivide(
-        float value,
-        float divisor)
+    private static void SetGhostMaterial(Block ghost, bool canBuild)
     {
-        if (Mathf.Abs(divisor) < 0.0001f)
-        {
-            return value;
-        }
-
-        return value / divisor;
-    }
-
-    private static void SetGhostMaterial(
-        Block ghost,
-        bool canBuild)
-    {
-        if (ghost == null ||
-            ghost.occupyingComponent == null)
-        {
+        if (ghost == null || ghost.occupyingComponent == null)
             return;
-        }
 
-        GameManager gameManager =
-            SingletonGeneric<GameManager>.Singleton;
-
+        GameManager gameManager = SingletonGeneric<GameManager>.Singleton;
         if (gameManager == null)
-        {
             return;
-        }
 
-        Material material =
-            canBuild
-                ? gameManager.ghostMaterialGreen
-                : gameManager.ghostMaterialRed;
-
+        Material material = canBuild ? gameManager.ghostMaterialGreen : gameManager.ghostMaterialRed;
         if (material != null)
-        {
             ghost.occupyingComponent.SetNewMaterial(material);
-        }
-    }
-}
-
-
-[HarmonyPatch(typeof(ColliderPrefabEnabler), "AttachColliderPrefab")]
-public static class ColliderPrefabEnabler_Attach_IslandLife
-{
-    [HarmonyPostfix]
-    public static void Postfix(Block block)
-    {
-        if (block == null ||
-            block.GetComponent<IslandBlockTag>() == null ||
-            block.activeColliderPrefab == null)
-        {
-            return;
-        }
-
-        BlockQuad[] quads =
-            block.activeColliderPrefab
-                .GetComponentsInChildren<BlockQuad>(true);
-
-        Debug.Log(
-            "[IslandLife] Активные строительные точки: " +
-            (quads != null ? quads.Length : 0)
-        );
     }
 }
 
 public static class IslandLifeCollisionCleanup
 {
-    public static void Cleanup(
-        IslandBlockTag tag)
+    public static void Cleanup(IslandBlockTag tag)
     {
-        if (tag == null ||
-            tag.CollisionProxies == null)
-        {
+        if (tag == null || tag.CollisionProxies == null)
             return;
-        }
 
         for (int i = 0; i < tag.CollisionProxies.Length; i++)
         {
-            GameObject proxy =
-                tag.CollisionProxies[i];
-
+            GameObject proxy = tag.CollisionProxies[i];
             if (proxy == null)
-            {
                 continue;
-            }
 
-            Collider[] colliders =
-                proxy.GetComponentsInChildren<Collider>(true);
-
-            for (int j = 0; j < colliders.Length; j++)
-            {
-                if (colliders[j] != null)
-                {
-                    colliders[j].enabled = false;
-                }
-            }
+            Collider collider = proxy.GetComponent<Collider>();
+            if (collider != null)
+                collider.enabled = false;
 
             UnityEngine.Object.Destroy(proxy);
         }
 
-        tag.CollisionProxies =
-            new GameObject[0];
+        tag.CollisionProxies = new GameObject[0];
     }
 }
 
-[HarmonyPatch(typeof(BlockCreator), "RemoveBlock")]
-public static class BlockCreator_RemoveBlock_IslandLife
+public static class IslandLifeNetwork
 {
-    [HarmonyPrefix]
-    public static void Prefix(
-        Block block,
-        ref bool updateRaftBounds)
+    private const int IslandMarker = 1 << 30;
+    private const int SlotBits = 5;
+    private const int SlotMask = (1 << SlotBits) - 1;
+
+    public static void RequestPlace(
+        BlockCreator creator,
+        Network_Player player,
+        Item_Base item,
+        DPS dpsType,
+        IslandBuildRoot root,
+        Vector3 worldPosition,
+        Quaternion worldRotation)
     {
-        if (block == null)
+        if (creator == null ||
+            player == null ||
+            item == null ||
+            root == null ||
+            root.Landmark == null)
+        {
+            return;
+        }
+
+        int hotbarIndex =
+            player.Inventory.hotbar.GetSelectedSlotIndex();
+
+        int encoded =
+            EncodeContext(
+                root.Landmark,
+                hotbarIndex
+            );
+
+        if (encoded == 0)
+            return;
+
+        Vector3 localPosition =
+            root.Landmark.transform.InverseTransformPoint(
+                worldPosition
+            );
+
+        Quaternion localRotation =
+            Quaternion.Inverse(
+                root.Landmark.transform.rotation
+            ) *
+            worldRotation;
+
+        if (Raft_Network.IsHost)
+        {
+            Block block =
+                CreateAuthoritative(
+                    creator,
+                    player,
+                    item,
+                    dpsType,
+                    root.Landmark,
+                    localPosition,
+                    localRotation,
+                    hotbarIndex,
+                    true
+                );
+
+            if (block == null)
+                return;
+
+            Message_BlockCreator_PlaceBlock message =
+                CreatePlaceMessage(
+                    creator,
+                    item,
+                    dpsType,
+                    encoded,
+                    localPosition,
+                    localRotation,
+                    block
+                );
+
+            player.Network.RPC(
+                message,
+                Target.Other,
+                EP2PSend.k_EP2PSendReliable,
+                NetworkChannel.Channel_Game
+            );
+
+            return;
+        }
+
+        Message_BlockCreator_PlaceBlock request =
+            new Message_BlockCreator_PlaceBlock(
+                Messages.BlockCreator_PlaceBlock,
+                creator,
+                item.UniqueIndex,
+                0U,
+                0U,
+                0U,
+                localPosition,
+                localRotation.eulerAngles,
+                encoded,
+                dpsType
+            );
+
+        player.SendP2P(
+            request,
+            EP2PSend.k_EP2PSendReliable,
+            NetworkChannel.Channel_Game
+        );
+
+        creator.SetGhostBlockVisibility(false);
+    }
+
+    public static bool TryHandleDeserialize(
+        BlockCreator creator,
+        Message_NetworkBehaviour message,
+        Network_UserId remoteID,
+        out bool result)
+    {
+        result = false;
+
+        if (creator == null ||
+            message == null)
+        {
+            return false;
+        }
+
+        if (message.Type == Messages.BlockCreator_PlaceBlock)
+        {
+            Message_BlockCreator_PlaceBlock place =
+                message as Message_BlockCreator_PlaceBlock;
+
+            long landmarkIndex;
+            int hotbarIndex;
+
+            if (place == null ||
+                !TryDecodeContext(
+                    place.hotSlotIndex,
+                    out landmarkIndex,
+                    out hotbarIndex))
+            {
+                return false;
+            }
+
+            result =
+                HandlePlaceMessage(
+                    creator,
+                    place,
+                    remoteID,
+                    landmarkIndex,
+                    hotbarIndex
+                );
+
+            return true;
+        }
+
+        if (message.Type == Messages.BlockCreator_RemoveBlock)
+        {
+            Message_BlockCreator_RemoveBlock remove =
+                message as Message_BlockCreator_RemoveBlock;
+
+            Block block =
+                remove != null
+                    ? FindIslandBlock(remove.blockObjectIndex)
+                    : null;
+
+            if (block == null)
+                return false;
+
+            Raft_Network network =
+                ComponentManager<Raft_Network>.Value;
+
+            Network_Player removingPlayer =
+                network != null
+                    ? network.GetPlayerFromID(remove.SteamID)
+                    : null;
+
+            BlockCreator.RemoveBlock(
+                block,
+                removingPlayer,
+                false
+            );
+
+            result = true;
+            return true;
+        }
+
+        if (message.Type == Messages.BlockCreator_UpdateHealth)
+        {
+            Message_BlockCreator_UpdateHealth health =
+                message as Message_BlockCreator_UpdateHealth;
+
+            Block block =
+                health != null
+                    ? FindIslandBlock(health.blockObjectIndex)
+                    : null;
+
+            if (block == null)
+                return false;
+
+            block.MaxHealth =
+                health.newMaxHealth;
+
+            block.SetHealth(
+                health.newHealth
+            );
+
+            result = true;
+            return true;
+        }
+
+        if (message.Type == Messages.BlockCreator_SetReinforced)
+        {
+            Message_BlockCreator_SetReinforced reinforced =
+                message as Message_BlockCreator_SetReinforced;
+
+            Block block =
+                reinforced != null
+                    ? FindIslandBlock(reinforced.blockObjectIndex)
+                    : null;
+
+            if (block == null)
+                return false;
+
+            Raft_Network network =
+                ComponentManager<Raft_Network>.Value;
+
+            Network_Player player =
+                network != null
+                    ? network.GetPlayerFromID(reinforced.SteamID)
+                    : null;
+
+            if (player == null ||
+                player.HammerScript == null)
+            {
+                result = false;
+                return true;
+            }
+
+            result =
+                player.HammerScript.ReinforceBlock(
+                    block
+                );
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool HandlePlaceMessage(
+        BlockCreator creator,
+        Message_BlockCreator_PlaceBlock message,
+        Network_UserId remoteID,
+        long landmarkIndex,
+        int hotbarIndex)
+    {
+        Landmark landmark =
+            FindLandmark(landmarkIndex);
+
+        Item_Base item =
+            ItemManager.GetItemByIndex(
+                message.uniqueBlockIndex
+            );
+
+        Network_Player player =
+            creator.GetPlayerNetwork();
+
+        if (landmark == null ||
+            item == null ||
+            player == null)
+        {
+            return false;
+        }
+
+        Vector3 worldPosition =
+            landmark.transform.TransformPoint(
+                message.LocalPosition
+            );
+
+        Quaternion localRotation =
+            Quaternion.Euler(
+                message.LocalEuler
+            );
+
+        Quaternion worldRotation =
+            landmark.transform.rotation *
+            localRotation;
+
+        if (Raft_Network.IsHost)
+        {
+            if (player.steamID != remoteID ||
+                !BlockCreator_Update_IslandLife.CanStartIslandBuild(item) ||
+                Vector3.Distance(
+                    player.transform.position,
+                    worldPosition) > Player.UseDistance * 3f)
+            {
+                return false;
+            }
+
+            Block prefab =
+                item.settings_buildable.GetBlockPrefab(
+                    message.dpsType
+                );
+
+            if (prefab == null ||
+                !creator.HasEnoughResourcesToBuild(prefab))
+            {
+                return false;
+            }
+
+            if (item.settings_buildable.Placeable)
+            {
+                Slot slot =
+                    hotbarIndex >= 0
+                        ? player.Inventory.GetSlot(hotbarIndex)
+                        : null;
+
+                if (slot == null ||
+                    slot.IsEmpty)
+                {
+                    return false;
+                }
+            }
+
+            IslandBuildRoot root =
+                BlockCreator_Update_IslandLife.GetOrCreateRoot(
+                    landmark,
+                    worldPosition,
+                    worldRotation,
+                    GetTerrainLayer(
+                        landmark,
+                        worldPosition
+                    )
+                );
+
+            Block block =
+                CreateAuthoritative(
+                    creator,
+                    player,
+                    item,
+                    message.dpsType,
+                    landmark,
+                    message.LocalPosition,
+                    localRotation,
+                    hotbarIndex,
+                    false
+                );
+
+            if (block == null)
+                return false;
+
+            message.blockObjectIndex =
+                block.ObjectIndex;
+
+            if (block.networkedBehaviour != null)
+            {
+                message.networkedObjectIndex =
+                    block.networkedBehaviour.ObjectIndex;
+
+                message.networkedBehaviourIndex =
+                    block.networkedBehaviour.BehaviourIndex;
+            }
+
+            return true;
+        }
+
+        if (message.blockObjectIndex == 0U ||
+            FindIslandBlock(message.blockObjectIndex) != null)
+        {
+            return false;
+        }
+
+        IslandBuildRoot clientRoot =
+            BlockCreator_Update_IslandLife.GetOrCreateRoot(
+                landmark,
+                worldPosition,
+                worldRotation,
+                GetTerrainLayer(
+                    landmark,
+                    worldPosition
+                )
+            );
+
+        bool consume =
+            player.IsLocalPlayer &&
+            hotbarIndex >= 0;
+
+        BlockCreator_Update_IslandLife.CreateIslandBlock(
+            creator,
+            player,
+            item,
+            message.dpsType,
+            clientRoot,
+            worldPosition,
+            worldRotation,
+            consume,
+            "net-" + message.blockObjectIndex,
+            false,
+            -1,
+            -1,
+            false,
+            true,
+            hotbarIndex,
+            message.blockObjectIndex,
+            message.networkedObjectIndex,
+            message.networkedBehaviourIndex
+        );
+
+        return false;
+    }
+
+    private static Block CreateAuthoritative(
+        BlockCreator creator,
+        Network_Player player,
+        Item_Base item,
+        DPS dpsType,
+        Landmark landmark,
+        Vector3 localPosition,
+        Quaternion localRotation,
+        int hotbarIndex,
+        bool consumeResources)
+    {
+        Vector3 worldPosition =
+            landmark.transform.TransformPoint(
+                localPosition
+            );
+
+        Quaternion worldRotation =
+            landmark.transform.rotation *
+            localRotation;
+
+        IslandBuildRoot root =
+            BlockCreator_Update_IslandLife.GetOrCreateRoot(
+                landmark,
+                worldPosition,
+                worldRotation,
+                GetTerrainLayer(
+                    landmark,
+                    worldPosition
+                )
+            );
+
+        if (HasSameBlock(
+            root,
+            item,
+            worldPosition))
+        {
+            return null;
+        }
+
+        return BlockCreator_Update_IslandLife.CreateIslandBlock(
+            creator,
+            player,
+            item,
+            dpsType,
+            root,
+            worldPosition,
+            worldRotation,
+            consumeResources,
+            null,
+            true,
+            -1,
+            -1,
+            false,
+            true,
+            hotbarIndex
+        );
+    }
+
+    private static Message_BlockCreator_PlaceBlock CreatePlaceMessage(
+        BlockCreator creator,
+        Item_Base item,
+        DPS dpsType,
+        int encodedContext,
+        Vector3 localPosition,
+        Quaternion localRotation,
+        Block block)
+    {
+        return new Message_BlockCreator_PlaceBlock(
+            Messages.BlockCreator_PlaceBlock,
+            creator,
+            item.UniqueIndex,
+            block.ObjectIndex,
+            block.networkedBehaviour != null
+                ? block.networkedBehaviour.ObjectIndex
+                : 0U,
+            block.networkedBehaviour != null
+                ? block.networkedBehaviour.BehaviourIndex
+                : 0U,
+            localPosition,
+            localRotation.eulerAngles,
+            encodedContext,
+            dpsType
+        );
+    }
+
+    public static void AppendWorldMessages(
+        BlockCreator creator)
+    {
+        if (!Raft_Network.IsHost ||
+            creator == null)
+        {
+            return;
+        }
+
+        Raft_Network network =
+            ComponentManager<Raft_Network>.Value;
+
+        Network_Player player =
+            creator.GetPlayerNetwork();
+
+        if (network == null ||
+            player == null ||
+            player.steamID != network.HostID)
+        {
+            return;
+        }
+
+        List<IslandBlockTag> tags =
+            new List<IslandBlockTag>(
+                IslandBlockTag.ActiveTags
+            );
+
+        for (int i = 0; i < tags.Count; i++)
+        {
+            IslandBlockTag tag =
+                tags[i];
+
+            Block block =
+                tag != null
+                    ? tag.GetComponent<Block>()
+                    : null;
+
+            if (block == null ||
+                block.buildableItem == null ||
+                tag.Root == null ||
+                tag.Root.Landmark == null)
+            {
+                continue;
+            }
+
+            int encoded =
+                EncodeContext(
+                    tag.Root.Landmark,
+                    -1
+                );
+
+            if (encoded == 0)
+                continue;
+
+            Vector3 localPosition =
+                tag.Root.Landmark.transform.InverseTransformPoint(
+                    block.transform.position
+                );
+
+            Quaternion localRotation =
+                Quaternion.Inverse(
+                    tag.Root.Landmark.transform.rotation
+                ) *
+                block.transform.rotation;
+
+            Message_BlockCreator_PlaceBlock place =
+                CreatePlaceMessage(
+                    creator,
+                    block.buildableItem,
+                    block.dpsType,
+                    encoded,
+                    localPosition,
+                    localRotation,
+                    block
+                );
+
+            creator.MessagesStack.Add(
+                place
+            );
+
+            if (block.Health != block.MaxHealth)
+            {
+                creator.MessagesStack.Add(
+                    new Message_BlockCreator_UpdateHealth(
+                        Messages.BlockCreator_UpdateHealth,
+                        creator,
+                        block.ObjectIndex,
+                        block.Health,
+                        block.MaxHealth
+                    )
+                );
+            }
+        }
+    }
+
+    public static void BroadcastExisting(
+        Block block)
+    {
+        if (!Raft_Network.IsHost ||
+            block == null)
         {
             return;
         }
@@ -2229,20 +1916,365 @@ public static class BlockCreator_RemoveBlock_IslandLife
         IslandBlockTag tag =
             block.GetComponent<IslandBlockTag>();
 
-        if (tag == null)
+        if (tag == null ||
+            tag.Root == null ||
+            tag.Root.Landmark == null ||
+            block.buildableItem == null)
         {
             return;
         }
 
+        Raft_Network network =
+            ComponentManager<Raft_Network>.Value;
+
+        Network_Player host =
+            network != null
+                ? network.GetLocalPlayer()
+                : null;
+
+        if (network == null ||
+            host == null ||
+            host.BlockCreator == null)
+        {
+            return;
+        }
+
+        int encoded =
+            EncodeContext(
+                tag.Root.Landmark,
+                -1
+            );
+
+        if (encoded == 0)
+            return;
+
+        Vector3 localPosition =
+            tag.Root.Landmark.transform.InverseTransformPoint(
+                block.transform.position
+            );
+
+        Quaternion localRotation =
+            Quaternion.Inverse(
+                tag.Root.Landmark.transform.rotation
+            ) *
+            block.transform.rotation;
+
+        Message_BlockCreator_PlaceBlock message =
+            CreatePlaceMessage(
+                host.BlockCreator,
+                block.buildableItem,
+                block.dpsType,
+                encoded,
+                localPosition,
+                localRotation,
+                block
+            );
+
+        network.RPC(
+            message,
+            Target.Other,
+            EP2PSend.k_EP2PSendReliable,
+            NetworkChannel.Channel_Game
+        );
+
+        if (block.Health != block.MaxHealth)
+        {
+            network.RPC(
+                new Message_BlockCreator_UpdateHealth(
+                    Messages.BlockCreator_UpdateHealth,
+                    host.BlockCreator,
+                    block.ObjectIndex,
+                    block.Health,
+                    block.MaxHealth
+                ),
+                Target.Other,
+                EP2PSend.k_EP2PSendReliable,
+                NetworkChannel.Channel_Game
+            );
+        }
+    }
+
+    public static Block FindIslandBlock(
+        uint objectIndex)
+    {
+        foreach (IslandBlockTag tag
+                 in IslandBlockTag.ActiveTags)
+        {
+            if (tag == null)
+                continue;
+
+            Block block =
+                tag.GetComponent<Block>();
+
+            if (block != null &&
+                block.ObjectIndex == objectIndex)
+            {
+                return block;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool HasSameBlock(
+        IslandBuildRoot root,
+        Item_Base item,
+        Vector3 position)
+    {
+        if (root == null ||
+            item == null)
+        {
+            return true;
+        }
+
+        IslandBlockTag[] tags =
+            root.GetComponentsInChildren<IslandBlockTag>(
+                true
+            );
+
+        for (int i = 0; i < tags.Length; i++)
+        {
+            Block block =
+                tags[i] != null
+                    ? tags[i].GetComponent<Block>()
+                    : null;
+
+            if (block == null ||
+                block.buildableItem == null)
+            {
+                continue;
+            }
+
+            if (block.buildableItem.UniqueIndex ==
+                    item.UniqueIndex &&
+                Vector3.Distance(
+                    block.transform.position,
+                    position) <= 0.05f)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static Landmark FindLandmark(
+        long uniqueIndex)
+    {
+        Landmark[] landmarks =
+            UnityEngine.Object.FindObjectsOfType<Landmark>();
+
+        for (int i = 0; i < landmarks.Length; i++)
+        {
+            Landmark landmark =
+                landmarks[i];
+
+            if (landmark != null &&
+                (long)landmark.uniqueLandmarkIndex ==
+                    uniqueIndex)
+            {
+                return landmark;
+            }
+        }
+
+        return null;
+    }
+
+    private static int GetTerrainLayer(
+        Landmark landmark,
+        Vector3 position)
+    {
+        IslandBuildRoot[] roots =
+            landmark.GetComponentsInChildren<IslandBuildRoot>(
+                true
+            );
+
+        if (roots != null &&
+            roots.Length > 0)
+        {
+            return roots[0].TerrainLayer;
+        }
+
+        Collider[] colliders =
+            landmark.GetComponentsInChildren<Collider>(
+                true
+            );
+
+        float bestDistance =
+            float.MaxValue;
+
+        int bestLayer =
+            landmark.gameObject.layer;
+
+        for (int i = 0; i < colliders.Length; i++)
+        {
+            Collider collider =
+                colliders[i];
+
+            if (collider == null ||
+                collider.GetComponentInParent<Block>() != null)
+            {
+                continue;
+            }
+
+            float distance =
+                Vector3.Distance(
+                    collider.ClosestPoint(position),
+                    position
+                );
+
+            if (distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            bestLayer = collider.gameObject.layer;
+        }
+
+        return bestLayer;
+    }
+
+    private static int EncodeContext(
+        Landmark landmark,
+        int hotbarIndex)
+    {
+        if (landmark == null)
+            return 0;
+
+        long landmarkIndex =
+            (long)landmark.uniqueLandmarkIndex;
+
+        long maxLandmark =
+            (IslandMarker - 1) >> SlotBits;
+
+        if (landmarkIndex < 0 ||
+            landmarkIndex > maxLandmark)
+        {
+            Debug.LogWarning(
+                "[IslandLife] Индекс острова слишком большой для сетевого сообщения"
+            );
+
+            return 0;
+        }
+
+        int slotCode =
+            hotbarIndex >= 0
+                ? Mathf.Clamp(
+                    hotbarIndex + 1,
+                    1,
+                    SlotMask
+                )
+                : 0;
+
+        int raw =
+            IslandMarker |
+            ((int)landmarkIndex << SlotBits) |
+            slotCode;
+
+        return -raw;
+    }
+
+    private static bool TryDecodeContext(
+        int encoded,
+        out long landmarkIndex,
+        out int hotbarIndex)
+    {
+        landmarkIndex = 0;
+        hotbarIndex = -1;
+
+        if (encoded >= 0 ||
+            encoded == int.MinValue)
+        {
+            return false;
+        }
+
+        int raw =
+            -encoded;
+
+        if ((raw & IslandMarker) == 0)
+            return false;
+
+        landmarkIndex =
+            (raw & (IslandMarker - 1)) >>
+            SlotBits;
+
+        int slotCode =
+            raw & SlotMask;
+
+        hotbarIndex =
+            slotCode > 0
+                ? slotCode - 1
+                : -1;
+
+        return true;
+    }
+}
+
+[HarmonyPatch(typeof(BlockCreator), "Deserialize")]
+public static class BlockCreator_Deserialize_IslandLife
+{
+    [HarmonyPrefix]
+    public static bool Prefix(
+        BlockCreator __instance,
+        Message_NetworkBehaviour msg,
+        Network_UserId remoteID,
+        ref bool __result)
+    {
+        bool handled =
+            IslandLifeNetwork.TryHandleDeserialize(
+                __instance,
+                msg,
+                remoteID,
+                out __result
+            );
+
+        return !handled;
+    }
+}
+
+[HarmonyPatch(typeof(BlockCreator), "Serialize_Create")]
+public static class BlockCreator_SerializeCreate_IslandLife
+{
+    [HarmonyPostfix]
+    public static void Postfix(
+        BlockCreator __instance)
+    {
+        IslandLifeNetwork.AppendWorldMessages(
+            __instance
+        );
+    }
+}
+
+[HarmonyPatch(typeof(BlockCreator), "GetBlockByObjectIndex")]
+public static class BlockCreator_GetBlockByObjectIndex_IslandLife
+{
+    [HarmonyPostfix]
+    public static void Postfix(
+        uint objectIndex,
+        ref Block __result)
+    {
+        if (__result == null)
+        {
+            __result =
+                IslandLifeNetwork.FindIslandBlock(
+                    objectIndex
+                );
+        }
+    }
+}
+
+[HarmonyPatch(typeof(BlockCreator), "RemoveBlock")]
+public static class BlockCreator_RemoveBlock_IslandLife
+{
+    [HarmonyPrefix]
+    public static void Prefix(Block block, ref bool updateRaftBounds)
+    {
+        IslandBlockTag tag = block != null ? block.GetComponent<IslandBlockTag>() : null;
+        if (tag == null)
+            return;
+
         updateRaftBounds = false;
-
-        IslandLifeCollisionCleanup.Cleanup(
-            tag
-        );
-
-        IslandLifeStorage.RemoveRecord(
-            tag.RecordId
-        );
+        IslandLifeCollisionCleanup.Cleanup(tag);
+        IslandLifeStorage.RemoveRecord(tag.RecordId);
     }
 }
 
@@ -2252,28 +2284,18 @@ public static class Block_OnDestroy_IslandLife
     [HarmonyPrefix]
     public static void Prefix(Block __instance)
     {
-        if (__instance == null)
-        {
-            return;
-        }
-
-        IslandBlockTag tag =
-            __instance.GetComponent<IslandBlockTag>();
-
+        IslandBlockTag tag = __instance != null ? __instance.GetComponent<IslandBlockTag>() : null;
         if (tag != null)
-        {
-            IslandLifeCollisionCleanup.Cleanup(
-                tag
-            );
-        }
+            IslandLifeCollisionCleanup.Cleanup(tag);
     }
 }
 
 [Serializable]
 public class IslandLifeSaveData
 {
-    public List<IslandBlockRecord> blocks =
-        new List<IslandBlockRecord>();
+    [OptionalField]
+    public int version = 1;
+    public List<IslandBlockRecord> blocks = new List<IslandBlockRecord>();
 }
 
 [Serializable]
@@ -2282,6 +2304,8 @@ public class IslandBlockRecord
     public string id;
     public long landmarkIndex;
     public int itemIndex;
+    [OptionalField]
+    public string itemName;
     public int dpsType;
     public int terrainLayer;
 
@@ -2300,326 +2324,167 @@ public class IslandBlockRecord
 
 public static class IslandLifeStorage
 {
-    private const string FileName =
-        "IslandLife.dat";
+    // Имя сохраняется между версиями
+    private const string FileName = "IslandLife.dat";
+    private const string LegacyFileName = "IslandBuilding.dat";
 
-    private static IslandLifeSaveData data =
-        new IslandLifeSaveData();
-
-    private static string loadedWorldKey =
-        string.Empty;
-
+    private static IslandLifeSaveData data = new IslandLifeSaveData();
+    private static string loadedWorldKey = string.Empty;
     private static bool restoring;
+    private static bool storageHealthy = true;
 
-    public static void RegisterBlock(
-        Block block,
-        IslandBlockTag tag)
+    public static void RegisterBlock(Block block, IslandBlockTag tag)
     {
-        if (restoring ||
-            block == null ||
-            tag == null ||
-            tag.Root == null ||
-            tag.Root.Landmark == null)
-        {
+        if (restoring || block == null || tag == null || tag.Root == null || tag.Root.Landmark == null)
             return;
-        }
 
         EnsureLoaded();
 
-        IslandBlockRecord record =
-            FindRecord(tag.RecordId);
-
+        IslandBlockRecord record = FindRecord(tag.RecordId);
         if (record == null)
         {
-            record =
-                new IslandBlockRecord();
-
-            record.id =
-                tag.RecordId;
-
+            record = new IslandBlockRecord { id = tag.RecordId };
             data.blocks.Add(record);
         }
 
-        FillRecord(
-            record,
-            block,
-            tag
-        );
+        FillRecord(record, block, tag);
     }
 
-    public static void RemoveRecord(
-        string recordId)
+    public static void RemoveRecord(string recordId)
     {
-        if (!Raft_Network.IsHost ||
-            string.IsNullOrEmpty(recordId))
-        {
+        if (!Raft_Network.IsHost || string.IsNullOrEmpty(recordId))
             return;
-        }
 
         EnsureLoaded();
-
-        data.blocks.RemoveAll(
-            r =>
-                r != null &&
-                r.id == recordId
-        );
+        data.blocks.RemoveAll(r => r != null && r.id == recordId);
     }
 
     public static void SaveCurrentWorld()
     {
         if (!Raft_Network.IsHost)
-        {
             return;
-        }
 
         EnsureLoaded();
-        CaptureActiveBlocks();
 
-        string path =
-            GetSavePath();
-
-        if (string.IsNullOrEmpty(path))
+        if (!storageHealthy)
         {
+            Debug.LogWarning("[IslandLife] Сохранение пропущено - старый файл не удалось прочитать");
             return;
         }
 
-        string directory =
-            Path.GetDirectoryName(path);
-
-        if (!Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        BinaryFormatter formatter =
-            new BinaryFormatter();
-
-        using (FileStream stream =
-            File.Open(
-                path,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None))
-        {
-            formatter.Serialize(
-                stream,
-                data
-            );
-        }
-
-        Debug.Log(
-            "[IslandLife] Постройки островов сохранены: " +
-            data.blocks.Count
-        );
+        CaptureActiveBlocks();
+        WriteData(GetSavePath(FileName), true);
     }
 
-    public static void LoadCurrentWorld(
-        bool force)
+    public static void LoadCurrentWorld(bool force)
     {
         if (!Raft_Network.IsHost)
-        {
             return;
-        }
 
-        string worldKey =
-            GetWorldKey();
-
-        if (!force &&
-            loadedWorldKey == worldKey)
-        {
+        string worldKey = GetWorldKey();
+        if (!force && loadedWorldKey == worldKey)
             return;
-        }
 
-        loadedWorldKey =
-            worldKey;
+        loadedWorldKey = worldKey;
+        data = new IslandLifeSaveData();
+        storageHealthy = true;
 
-        data =
-            new IslandLifeSaveData();
+        string legacyPath = GetSavePath(LegacyFileName);
+        string currentPath = GetSavePath(FileName);
 
-        string path =
-            GetSavePath();
+        bool legacyExists = !string.IsNullOrEmpty(legacyPath) && File.Exists(legacyPath);
 
-        if (!string.IsNullOrEmpty(path) &&
-            File.Exists(path))
+        bool loadedLegacy = legacyExists && MergeFile(legacyPath, false);
+        bool loadedCurrent = MergeFile(currentPath, true);
+
+        if (storageHealthy && (loadedLegacy || loadedCurrent))
         {
-            try
+            data.version = 1;
+
+            if (loadedLegacy)
             {
-                BinaryFormatter formatter =
-                    new BinaryFormatter();
+                bool migrated = WriteData(currentPath, true);
 
-                using (FileStream stream =
-                    File.Open(
-                        path,
-                        FileMode.Open,
-                        FileAccess.Read,
-                        FileShare.Read))
-                {
-                    IslandLifeSaveData loaded =
-                        formatter.Deserialize(stream)
-                            as IslandLifeSaveData;
-
-                    if (loaded != null &&
-                        loaded.blocks != null)
-                    {
-                        data = loaded;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning(
-                    "[IslandLife] Не удалось загрузить сохранение: " +
-                    ex.Message
-                );
-
-                data =
-                    new IslandLifeSaveData();
+                if (migrated)
+                    ArchiveLegacySave(legacyPath);
             }
         }
 
-        Debug.Log(
-            "[IslandLife] Постройки островов загружены: " +
-            data.blocks.Count
-        );
+        Debug.Log("[IslandLife] Постройки островов загружены: " + data.blocks.Count);
     }
 
     public static void RestoreAllActiveLandmarks()
     {
         if (!Raft_Network.IsHost)
-        {
             return;
-        }
 
         EnsureLoaded();
 
-        Landmark[] landmarks =
-            UnityEngine.Object.FindObjectsOfType<Landmark>();
-
+        Landmark[] landmarks = UnityEngine.Object.FindObjectsOfType<Landmark>();
         for (int i = 0; i < landmarks.Length; i++)
-        {
-            RestoreLandmark(
-                landmarks[i]
-            );
-        }
+            RestoreLandmark(landmarks[i]);
     }
 
-    public static void RestoreLandmark(
-        Landmark landmark)
+    public static void RestoreLandmark(Landmark landmark)
     {
-        if (!Raft_Network.IsHost ||
-            landmark == null)
-        {
+        if (!Raft_Network.IsHost || landmark == null)
             return;
-        }
 
         EnsureLoaded();
 
-        List<IslandBlockRecord> records =
-            data.blocks.FindAll(
-                r =>
-                    r != null &&
-                    r.landmarkIndex ==
-                    (long)landmark.uniqueLandmarkIndex
-            );
+        Raft_Network network = ComponentManager<Raft_Network>.Value;
+        Network_Player player = network != null ? network.GetLocalPlayer() : null;
 
-        if (records.Count == 0)
-        {
+        if (player == null || player.BlockCreator == null)
             return;
-        }
 
-        Raft_Network network =
-            ComponentManager<Raft_Network>.Value;
-
-        Network_Player player =
-            network != null
-                ? network.GetLocalPlayer()
-                : null;
-
-        if (player == null ||
-            player.BlockCreator == null)
-        {
-            return;
-        }
-
-        HashSet<string> existing =
-            new HashSet<string>();
-
-        IslandBlockTag[] currentTags =
-            landmark.GetComponentsInChildren<IslandBlockTag>(true);
+        HashSet<string> existing = new HashSet<string>();
+        IslandBlockTag[] currentTags = landmark.GetComponentsInChildren<IslandBlockTag>(true);
 
         for (int i = 0; i < currentTags.Length; i++)
         {
-            IslandBlockTag tag =
-                currentTags[i];
-
-            if (tag != null &&
-                !string.IsNullOrEmpty(tag.RecordId))
-            {
-                existing.Add(
-                    tag.RecordId
-                );
-            }
+            IslandBlockTag tag = currentTags[i];
+            if (tag != null && !string.IsNullOrEmpty(tag.RecordId))
+                existing.Add(tag.RecordId);
         }
 
         restoring = true;
 
         try
         {
-            for (int i = 0; i < records.Count; i++)
+            for (int i = 0; i < data.blocks.Count; i++)
             {
-                IslandBlockRecord record =
-                    records[i];
+                IslandBlockRecord record = data.blocks[i];
 
                 if (record == null ||
+                    record.landmarkIndex != (long)landmark.uniqueLandmarkIndex ||
                     existing.Contains(record.id))
-                {
                     continue;
-                }
 
-                Item_Base item =
-                    ItemManager.GetItemByIndex(
-                        record.itemIndex
-                    );
+                Item_Base item = !string.IsNullOrEmpty(record.itemName)
+                    ? ItemManager.GetItemByName(record.itemName)
+                    : null;
 
                 if (item == null)
-                {
+                    item = ItemManager.GetItemByIndex(record.itemIndex);
+
+                if (item == null)
                     continue;
-                }
 
-                Vector3 localPosition =
-                    new Vector3(
-                        record.px,
-                        record.py,
-                        record.pz
-                    );
+                Vector3 localPosition = new Vector3(record.px, record.py, record.pz);
+                Quaternion localRotation = Quaternion.Euler(record.rx, record.ry, record.rz);
 
-                Quaternion localRotation =
-                    Quaternion.Euler(
-                        record.rx,
-                        record.ry,
-                        record.rz
-                    );
+                Vector3 worldPosition = landmark.transform.TransformPoint(localPosition);
+                Quaternion worldRotation = landmark.transform.rotation * localRotation;
 
-                Vector3 worldPosition =
-                    landmark.transform.TransformPoint(
-                        localPosition
-                    );
+                IslandBuildRoot root = BlockCreator_Update_IslandLife.GetOrCreateRoot(
+                    landmark,
+                    worldPosition,
+                    worldRotation,
+                    record.terrainLayer);
 
-                Quaternion worldRotation =
-                    landmark.transform.rotation *
-                    localRotation;
-
-                IslandBuildRoot root =
-                    BlockCreator_Update_IslandLife
-                        .GetOrCreateRoot(
-                            landmark,
-                            worldPosition,
-                            worldRotation,
-                            record.terrainLayer
-                        );
-
-                BlockCreator_Update_IslandLife
-                    .CreateIslandBlock(
+                Block restored =
+                    BlockCreator_Update_IslandLife.CreateIslandBlock(
                         player.BlockCreator,
                         player,
                         item,
@@ -2632,8 +2497,12 @@ public static class IslandLifeStorage
                         false,
                         record.health,
                         record.maxHealth,
-                        record.reinforced
+                        record.reinforced,
+                        false
                     );
+
+                if (restored != null)
+                    IslandLifeNetwork.BroadcastExisting(restored);
             }
         }
         finally
@@ -2644,209 +2513,231 @@ public static class IslandLifeStorage
 
     private static void EnsureLoaded()
     {
-        string worldKey =
-            GetWorldKey();
-
-        if (loadedWorldKey != worldKey)
-        {
+        if (loadedWorldKey != GetWorldKey())
             LoadCurrentWorld(true);
-        }
     }
 
     private static void CaptureActiveBlocks()
     {
-        IslandBlockTag[] tags =
-            UnityEngine.Object.FindObjectsOfType<IslandBlockTag>();
-
-        HashSet<string> activeIds =
-            new HashSet<string>();
-
-        HashSet<long> activeLandmarks =
-            new HashSet<long>();
-
-        Landmark[] landmarks =
-            UnityEngine.Object.FindObjectsOfType<Landmark>();
-
-        for (int i = 0; i < landmarks.Length; i++)
-        {
-            Landmark landmark =
-                landmarks[i];
-
-            if (landmark != null &&
-                landmark.isSpawned)
-            {
-                activeLandmarks.Add(
-                    (long)landmark.uniqueLandmarkIndex
-                );
-            }
-        }
+        IslandBlockTag[] tags = UnityEngine.Object.FindObjectsOfType<IslandBlockTag>();
 
         for (int i = 0; i < tags.Length; i++)
         {
-            IslandBlockTag tag =
-                tags[i];
+            IslandBlockTag tag = tags[i];
 
-            if (tag == null ||
-                tag.Root == null ||
-                tag.Root.Landmark == null)
-            {
+            if (tag == null || tag.Root == null || tag.Root.Landmark == null)
                 continue;
-            }
 
-            Block block =
-                tag.GetComponent<Block>();
-
+            Block block = tag.GetComponent<Block>();
             if (block == null)
-            {
                 continue;
-            }
 
             if (string.IsNullOrEmpty(tag.RecordId))
-            {
-                tag.RecordId =
-                    Guid.NewGuid().ToString("N");
-            }
+                tag.RecordId = Guid.NewGuid().ToString("N");
 
-            activeIds.Add(
-                tag.RecordId
-            );
-
-            IslandBlockRecord record =
-                FindRecord(tag.RecordId);
-
+            IslandBlockRecord record = FindRecord(tag.RecordId);
             if (record == null)
             {
-                record =
-                    new IslandBlockRecord();
-
-                record.id =
-                    tag.RecordId;
-
+                record = new IslandBlockRecord { id = tag.RecordId };
                 data.blocks.Add(record);
             }
 
-            FillRecord(
-                record,
-                block,
-                tag
-            );
+            FillRecord(record, block, tag);
         }
-
-        data.blocks.RemoveAll(
-            r =>
-                r != null &&
-                activeLandmarks.Contains(
-                    r.landmarkIndex
-                ) &&
-                !activeIds.Contains(
-                    r.id
-                )
-        );
     }
 
-    private static void FillRecord(
-        IslandBlockRecord record,
-        Block block,
-        IslandBlockTag tag)
+    private static void FillRecord(IslandBlockRecord record, Block block, IslandBlockTag tag)
     {
-        Landmark landmark =
-            tag.Root.Landmark;
+        Landmark landmark = tag.Root.Landmark;
+        Vector3 localPosition = landmark.transform.InverseTransformPoint(block.transform.position);
+        Quaternion localRotation = Quaternion.Inverse(landmark.transform.rotation) * block.transform.rotation;
+        Vector3 euler = localRotation.eulerAngles;
 
-        Vector3 localPosition =
-            landmark.transform.InverseTransformPoint(
-                block.transform.position
-            );
+        record.landmarkIndex = (long)landmark.uniqueLandmarkIndex;
+        record.itemIndex = block.buildableItem != null ? block.buildableItem.UniqueIndex : 0;
+        record.itemName = block.buildableItem != null ? block.buildableItem.UniqueName : null;
+        record.dpsType = (int)block.dpsType;
+        record.terrainLayer = tag.Root.TerrainLayer;
 
-        Quaternion localRotation =
-            Quaternion.Inverse(
-                landmark.transform.rotation
-            ) *
-            block.transform.rotation;
+        record.px = localPosition.x;
+        record.py = localPosition.y;
+        record.pz = localPosition.z;
 
-        Vector3 euler =
-            localRotation.eulerAngles;
+        record.rx = euler.x;
+        record.ry = euler.y;
+        record.rz = euler.z;
 
-        record.landmarkIndex =
-            (long)landmark.uniqueLandmarkIndex;
-
-        record.itemIndex =
-            block.buildableItem != null
-                ? block.buildableItem.UniqueIndex
-                : 0;
-
-        record.dpsType =
-            (int)block.dpsType;
-
-        record.terrainLayer =
-            tag.Root.TerrainLayer;
-
-        record.px =
-            localPosition.x;
-
-        record.py =
-            localPosition.y;
-
-        record.pz =
-            localPosition.z;
-
-        record.rx =
-            euler.x;
-
-        record.ry =
-            euler.y;
-
-        record.rz =
-            euler.z;
-
-        record.health =
-            block.Health;
-
-        record.maxHealth =
-            block.MaxHealth;
-
-        record.reinforced =
-            block.Reinforced;
+        record.health = block.Health;
+        record.maxHealth = block.MaxHealth;
+        record.reinforced = block.Reinforced;
     }
 
-    private static IslandBlockRecord FindRecord(
-        string id)
+    private static IslandBlockRecord FindRecord(string id)
     {
-        if (data == null ||
-            data.blocks == null ||
-            string.IsNullOrEmpty(id))
-        {
+        if (data == null || data.blocks == null || string.IsNullOrEmpty(id))
             return null;
-        }
 
-        return data.blocks.Find(
-            r =>
-                r != null &&
-                r.id == id
-        );
+        return data.blocks.Find(r => r != null && r.id == id);
+    }
+
+    private static bool MergeFile(string path, bool overwriteExisting)
+    {
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            return false;
+
+        try
+        {
+            IslandLifeSaveData loaded = ReadData(path);
+            if (loaded == null || loaded.blocks == null)
+                return false;
+
+            for (int i = 0; i < loaded.blocks.Count; i++)
+            {
+                IslandBlockRecord incoming = loaded.blocks[i];
+                if (incoming == null || string.IsNullOrEmpty(incoming.id))
+                    continue;
+
+                IslandBlockRecord existing = FindRecord(incoming.id);
+
+                if (existing == null)
+                    data.blocks.Add(incoming);
+                else if (overwriteExisting)
+                    CopyRecord(incoming, existing);
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            storageHealthy = false;
+            Debug.LogWarning("[IslandLife] Не удалось загрузить " + Path.GetFileName(path) + ": " + ex.Message);
+            return false;
+        }
+    }
+
+    private static IslandLifeSaveData ReadData(string path)
+    {
+        BinaryFormatter formatter = new BinaryFormatter();
+        formatter.Binder = new LegacySaveBinder();
+
+        using (FileStream stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            return formatter.Deserialize(stream) as IslandLifeSaveData;
+    }
+
+    private static bool WriteData(string path, bool makeBackup)
+    {
+        if (string.IsNullOrEmpty(path))
+            return false;
+
+        try
+        {
+            string directory = Path.GetDirectoryName(path);
+            if (!Directory.Exists(directory))
+                Directory.CreateDirectory(directory);
+
+            string tempPath = path + ".tmp";
+            BinaryFormatter formatter = new BinaryFormatter();
+
+            using (FileStream stream = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                formatter.Serialize(stream, data);
+
+            if (File.Exists(path))
+            {
+                if (makeBackup)
+                    File.Copy(path, path + ".bak", true);
+
+                File.Delete(path);
+            }
+
+            File.Move(tempPath, path);
+            Debug.Log("[IslandLife] Постройки островов сохранены: " + data.blocks.Count);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[IslandLife] Не удалось сохранить постройки: " + ex.Message);
+            return false;
+        }
+    }
+
+    private static void ArchiveLegacySave(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            return;
+
+        try
+        {
+            string backup = path + ".migrated.bak";
+
+            if (File.Exists(backup))
+                File.Delete(backup);
+
+            File.Move(path, backup);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[IslandLife] Не удалось архивировать старое сохранение: " + ex.Message);
+        }
+    }
+
+    private static void CopyRecord(IslandBlockRecord source, IslandBlockRecord target)
+    {
+        target.id = source.id;
+        target.landmarkIndex = source.landmarkIndex;
+        target.itemIndex = source.itemIndex;
+        target.itemName = source.itemName;
+        target.dpsType = source.dpsType;
+        target.terrainLayer = source.terrainLayer;
+
+        target.px = source.px;
+        target.py = source.py;
+        target.pz = source.pz;
+
+        target.rx = source.rx;
+        target.ry = source.ry;
+        target.rz = source.rz;
+
+        target.health = source.health;
+        target.maxHealth = source.maxHealth;
+        target.reinforced = source.reinforced;
     }
 
     private static string GetWorldKey()
     {
-        return SaveAndLoad.CurrentGameFileName ??
-               string.Empty;
+        return SaveAndLoad.CurrentGameFileName ?? string.Empty;
     }
 
-    private static string GetSavePath()
+    private static string GetSavePath(string fileName)
     {
-        string worldKey =
-            GetWorldKey();
+        string worldKey = GetWorldKey();
 
-        if (string.IsNullOrEmpty(worldKey) ||
-            string.IsNullOrEmpty(SaveAndLoad.WorldPath))
-        {
+        if (string.IsNullOrEmpty(worldKey) || string.IsNullOrEmpty(SaveAndLoad.WorldPath))
             return null;
-        }
 
-        return Path.Combine(
-            SaveAndLoad.WorldPath,
-            worldKey,
-            FileName
-        );
+        return Path.Combine(SaveAndLoad.WorldPath, worldKey, fileName);
+    }
+
+    private sealed class LegacySaveBinder : SerializationBinder
+    {
+        public override Type BindToType(string assemblyName, string typeName)
+        {
+            if (typeName == "IslandBuildingSaveData" || typeName == "IslandLifeSaveData" ||
+                typeName.EndsWith(".IslandBuildingSaveData") || typeName.EndsWith(".IslandLifeSaveData"))
+                return typeof(IslandLifeSaveData);
+
+            if (typeName == "IslandBlockRecord" || typeName.EndsWith(".IslandBlockRecord"))
+                return typeof(IslandBlockRecord);
+
+            if (typeName.StartsWith("System.Collections.Generic.List`1") &&
+                typeName.Contains("IslandBlockRecord"))
+                return typeof(List<IslandBlockRecord>);
+
+            Type resolved = Type.GetType(typeName + ", " + assemblyName, false) ?? Type.GetType(typeName, false);
+            if (resolved != null)
+                return resolved;
+
+            throw new SerializationException("Не удалось восстановить тип " + typeName);
+        }
     }
 }
 
@@ -2877,9 +2768,7 @@ public static class Landmark_OnSpawn_IslandLife
     [HarmonyPostfix]
     public static void Postfix(Landmark __instance)
     {
-        IslandLifeStorage.RestoreLandmark(
-            __instance
-        );
+        IslandLifeStorage.RestoreLandmark(__instance);
     }
 }
 
@@ -2889,50 +2778,28 @@ public static class SaveAndLoad_CreateRGDGame_IslandLife
     [HarmonyPostfix]
     public static void Postfix(RGD_Game __result)
     {
-        if (__result == null ||
-            __result.behaviours == null)
-        {
+        if (__result == null || __result.behaviours == null)
             return;
-        }
 
-        IslandBlockTag[] tags =
-            UnityEngine.Object.FindObjectsOfType<IslandBlockTag>();
-
+        IslandBlockTag[] tags = UnityEngine.Object.FindObjectsOfType<IslandBlockTag>();
         if (tags == null || tags.Length == 0)
-        {
             return;
-        }
 
-        HashSet<uint> objectIndexes =
-            new HashSet<uint>();
+        HashSet<uint> objectIndexes = new HashSet<uint>();
 
         for (int i = 0; i < tags.Length; i++)
         {
             IslandBlockTag tag = tags[i];
-
-            if (tag == null)
-            {
-                continue;
-            }
-
-            Block block = tag.GetComponent<Block>();
+            Block block = tag != null ? tag.GetComponent<Block>() : null;
 
             if (block != null)
-            {
                 objectIndexes.Add(block.ObjectIndex);
-            }
         }
 
-        __result.behaviours.RemoveAll(
-            rgd =>
-            {
-                RGD_Block blockData = rgd as RGD_Block;
-
-                return blockData != null &&
-                       objectIndexes.Contains(
-                           blockData.BlockObjectIndex
-                       );
-            }
-        );
+        __result.behaviours.RemoveAll(rgd =>
+        {
+            RGD_Block blockData = rgd as RGD_Block;
+            return blockData != null && objectIndexes.Contains(blockData.BlockObjectIndex);
+        });
     }
 }

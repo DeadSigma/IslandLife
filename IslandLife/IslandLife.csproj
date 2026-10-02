@@ -62,6 +62,11 @@
 			<Private>false</Private>
 		</Reference>
 
+		<Reference Include="com.rlabrecque.steamworks.net">
+			<HintPath>$(RaftDir)\Raft_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+
 		<Reference Include="UnityEngine">
 			<HintPath>$(RaftDir)\Raft_Data\Managed\UnityEngine.dll</HintPath>
 			<Private>false</Private>
@@ -107,6 +112,10 @@
 		<Error
 			Condition="!Exists('$(RmlPublicizedDir)\FMODUnity.dll')"
 			Text="Publicized FMODUnity.dll не найден: $(RmlPublicizedDir)\FMODUnity.dll. Запусти Raft через RML хотя бы один раз" />
+
+		<Error
+			Condition="!Exists('$(RaftDir)\Raft_Data\Managed\com.rlabrecque.steamworks.net.dll')"
+			Text="Steamworks.NET не найден: $(RaftDir)\Raft_Data\Managed\com.rlabrecque.steamworks.net.dll" />
 	</Target>
 
 	<Target Name="SetReleaseRmodMode">
