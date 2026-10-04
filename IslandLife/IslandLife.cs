@@ -65,8 +65,6 @@ public static class BlockCreator_Update_IslandLife
     private static readonly FieldInfo QuadHitField = AccessTools.Field(typeof(BlockCreator), "quadHit");
     private static readonly FieldInfo SelectedBuildablePrefabField = AccessTools.Field(typeof(BlockCreator), "selectedBuildablePrefab");
     private static readonly FieldInfo ColliderPrefabEnablerField = AccessTools.Field(typeof(BlockCreator), "colliderPrefabEnabler");
-    private static readonly FieldInfo EventRefPlaceBlockField = AccessTools.Field(typeof(BlockCreator), "eventRef_placeBlock");
-    private static readonly FieldInfo EventRefCreateBlockField = AccessTools.Field(typeof(BlockCreator), "eventRef_createBlock");
 
     private static readonly MethodInfo HandleRotationMethod = AccessTools.Method(typeof(BlockCreator), "HandleRotationOfSelectedBlock");
     private static readonly MethodInfo HandleMirroredMethod = AccessTools.Method(typeof(BlockCreator), "HandleMirroredVersion");
@@ -1178,35 +1176,15 @@ public static class BlockCreator_Update_IslandLife
             return;
         }
 
-        bool placeable =
-            item.settings_buildable.Placeable;
+        EventReference eventRef =
+            item.settings_buildable.Placeable
+                ? creator.er_placeBlock
+                : creator.er_createBlock;
 
-        FieldInfo field =
-            placeable
-                ? EventRefPlaceBlockField
-                : EventRefCreateBlockField;
-
-        string eventRef =
-            field != null
-                ? field.GetValue(creator) as string
-                : null;
-
-        if (!placeable &&
-            string.IsNullOrEmpty(eventRef) &&
-            EventRefPlaceBlockField != null)
-        {
-            eventRef =
-                EventRefPlaceBlockField.GetValue(creator)
-                    as string;
-        }
-
-        if (!string.IsNullOrEmpty(eventRef))
-        {
-            RuntimeManager.PlayOneShot(
-                eventRef,
-                position
-            );
-        }
+        RuntimeManager.PlayOneShot(
+            eventRef,
+            position
+        );
     }
 
     private static BoxCollider[] GetPhysicalColliders(Block block)
@@ -1423,6 +1401,53 @@ public static class IslandLifeNetwork
         );
 
         creator.SetGhostBlockVisibility(false);
+    }
+
+    public static bool TryHandlePlayerDeserialize(
+        Network_Player player,
+        Message_NetworkBehaviour message,
+        Network_UserId remoteID,
+        out bool result)
+    {
+        result = false;
+
+        if (player == null ||
+            message == null ||
+            message.Type != Messages.Axe_RemoveBlock)
+        {
+            return false;
+        }
+
+        Message_BlockCreator_RemoveBlock remove =
+            message as Message_BlockCreator_RemoveBlock;
+
+        if (remove == null)
+            return false;
+
+        Block block =
+            FindIslandBlock(
+                remove.blockObjectIndex
+            );
+
+        if (block == null)
+            return false;
+
+        if (Raft_Network.IsHost &&
+            player.steamID != remoteID)
+        {
+            return true;
+        }
+
+        if (player.AxeScript == null)
+            return true;
+
+        result =
+            player.AxeScript.DestroyBlock(
+                block,
+                false
+            );
+
+        return true;
     }
 
     public static bool TryHandleDeserialize(
@@ -2206,6 +2231,28 @@ public static class IslandLifeNetwork
                 : -1;
 
         return true;
+    }
+}
+
+[HarmonyPatch(typeof(Network_Player), "Deserialize")]
+public static class Network_Player_Deserialize_IslandLife
+{
+    [HarmonyPrefix]
+    public static bool Prefix(
+        Network_Player __instance,
+        Message_NetworkBehaviour msg,
+        Network_UserId remoteID,
+        ref bool __result)
+    {
+        bool handled =
+            IslandLifeNetwork.TryHandlePlayerDeserialize(
+                __instance,
+                msg,
+                remoteID,
+                out __result
+            );
+
+        return !handled;
     }
 }
 
