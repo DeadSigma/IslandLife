@@ -2,7 +2,7 @@
   "name": "Island Life",
   "author": "El_Neuman",
   "description": "Allows building on islands with the normal Raft building system",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "requiredByAllPlayers": true,
   "icon": "icon.png",
   "banner": "banner.png",

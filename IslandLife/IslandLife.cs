@@ -16,7 +16,7 @@ public class IslandLife : Mod
 
     public void Awake()
     {
-        harmony = new Harmony("el.islandlife");
+        harmony = new Harmony("el_neuman.islandlife");
         harmony.PatchAll();
         Debug.Log("[IslandLife] Loaded");
     }

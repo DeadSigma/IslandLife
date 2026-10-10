@@ -18,6 +18,7 @@ public static class BlockCreator_Update_IslandLife
     private static readonly FieldInfo QuadHitField = AccessTools.Field(typeof(BlockCreator), "quadHit");
     private static readonly FieldInfo SelectedBuildablePrefabField = AccessTools.Field(typeof(BlockCreator), "selectedBuildablePrefab");
     private static readonly FieldInfo ColliderPrefabEnablerField = AccessTools.Field(typeof(BlockCreator), "colliderPrefabEnabler");
+    private static readonly FieldInfo CurrentPipeColliderField = AccessTools.Field(typeof(Block_Pipe), "currentPipeCollider");
 
     private static readonly MethodInfo HandleRotationMethod = AccessTools.Method(typeof(BlockCreator), "HandleRotationOfSelectedBlock");
     private static readonly MethodInfo HandleMirroredMethod = AccessTools.Method(typeof(BlockCreator), "HandleMirroredVersion");
@@ -53,6 +54,23 @@ public static class BlockCreator_Update_IslandLife
         Vector3 snapPosition;
         Quaternion snapRotation;
         IslandBuildRoot snapRoot;
+
+        if (IsGridSnapActive() && IslandPipeGrid.IsPipeBuild(__instance.selectedBlock))
+        {
+            Block selectedPrefab;
+            Block pipeGhost = PrepareGhost(__instance, ___selectedBuildableItem, DPS.Default, out selectedPrefab);
+            if (pipeGhost != null && selectedPrefab != null)
+            {
+                pipeGhost.transform.rotation = IslandPipeGrid.GetGridRotation(selectedPrefab);
+                if (IslandPipeGrid.TryGetSnap(___playerNetwork, pipeGhost, out snapPosition, out snapRoot))
+                {
+                    IslandGridMode.MarkIslandBuildActive();
+                    pipeGhost.transform.position = snapPosition;
+                    PlaceGhost(__instance, ___playerNetwork, pipeGhost, snapRoot, DPS.Default);
+                    return false;
+                }
+            }
+        }
 
         if (IsGridSnapActive())
         {
@@ -152,10 +170,19 @@ public static class BlockCreator_Update_IslandLife
         return ghost;
     }
 
+    private static int lastRotationFrame = -1;
+    private static Block lastRotatedGhost;
+
     private static Block ApplyRotationAndMirror(BlockCreator creator, out Block selectedPrefab)
     {
-        HandleIslandRotation(creator);
-        HandleMirroredMethod.Invoke(creator, null);
+        Block current = creator.selectedBlock;
+        if (current != null && (lastRotationFrame != Time.frameCount || lastRotatedGhost != current))
+        {
+            HandleIslandRotation(creator);
+            HandleMirroredMethod.Invoke(creator, null);
+            lastRotatedGhost = creator.selectedBlock;
+            lastRotationFrame = Time.frameCount;
+        }
 
         Block ghost = creator.selectedBlock;
         selectedPrefab = SelectedBuildablePrefabField.GetValue(creator) as Block;
@@ -790,6 +817,9 @@ public static class BlockCreator_Update_IslandLife
             yaw = gridYaw + relativeSteps * 90f;
         }
 
+        if (IslandGridMode.Enabled && !alignToTerrain && IslandPipeGrid.IsPipeBuild(ghost))
+            yaw = Mathf.Round(yaw / 90f) * 90f;
+
         Quaternion baseRotation = Quaternion.Euler(baseEuler.x, yaw, baseEuler.z);
         Vector3 supportNormal = alignToTerrain ? hit.normal.normalized : Vector3.up;
 
@@ -1357,25 +1387,13 @@ public static class BlockCreator_Update_IslandLife
             block.Reinforced = true;
 
         BoxCollider[] proxyColliders;
-        tag.CollisionProxies =
-            CreateStaticCollisionProxies(
-                physicalColliders,
-                root,
-                block,
-                out proxyColliders
-            );
+        tag.CollisionProxies = CreateStaticCollisionProxies(
+            physicalColliders,
+            root,
+            block,
+            out proxyColliders);
 
         block.blockColliders = proxyColliders;
-
-        for (int i = 0; i < physicalColliders.Length; i++)
-        {
-            BoxCollider collider = physicalColliders[i];
-
-            if (collider == null)
-                continue;
-
-            collider.enabled = false;
-        }
 
         if (block.occupyingComponent != null)
             block.occupyingComponent.RestoreToDefaultMaterial();
@@ -1490,49 +1508,201 @@ public static class BlockCreator_Update_IslandLife
     }
 
     private static GameObject[] CreateStaticCollisionProxies(
-        BoxCollider[] sourceColliders,
+        BoxCollider[] blockColliders,
         IslandBuildRoot root,
         Block block,
         out BoxCollider[] proxyColliders)
     {
-        proxyColliders = new BoxCollider[0];
-
-        if (sourceColliders == null || root == null || block == null)
-            return new GameObject[0];
-
         List<GameObject> proxies = new List<GameObject>();
-        List<BoxCollider> colliders = new List<BoxCollider>();
+        List<BoxCollider> boxes = new List<BoxCollider>();
+        HashSet<Collider> processed = new HashSet<Collider>();
 
-        for (int i = 0; i < sourceColliders.Length; i++)
+        proxyColliders = new BoxCollider[0];
+        if (root == null || block == null)
+            return proxies.ToArray();
+
+        // Физические коллайдеры блока могут быть выключены во время OnFinishedPlacement
+        if (blockColliders != null)
         {
-            BoxCollider source = sourceColliders[i];
-            if (source == null)
-                continue;
+            for (int i = 0; i < blockColliders.Length; i++)
+            {
+                BoxCollider source = blockColliders[i];
+                if (source == null || !processed.Add(source))
+                    continue;
 
-            GameObject proxy = new GameObject("IslandStaticCollision");
-            proxy.layer = source.gameObject.layer;
-            proxy.transform.SetParent(source.transform, false);
-            proxy.transform.localPosition = Vector3.zero;
-            proxy.transform.localRotation = Quaternion.identity;
-            proxy.transform.localScale = Vector3.one;
-
-            IslandCollisionProxy marker = proxy.AddComponent<IslandCollisionProxy>();
-            marker.Root = root;
-            marker.SourceBlock = block;
-
-            BoxCollider collider = proxy.AddComponent<BoxCollider>();
-            collider.center = source.center;
-            collider.size = source.size;
-            collider.sharedMaterial = source.sharedMaterial;
-            collider.isTrigger = false;
-            collider.enabled = true;
-
-            proxies.Add(proxy);
-            colliders.Add(collider);
+                Collider physical = CreateTerrainCollider(source, root, block, proxies);
+                BoxCollider box = physical as BoxCollider;
+                if (box != null)
+                    boxes.Add(box);
+            }
         }
 
-        proxyColliders = colliders.ToArray();
+        // Многие предметы и лестницы используют отдельные Box/Mesh/Sphere/CapsuleCollider
+        Collider[] allColliders = block.GetComponentsInChildren<Collider>(true);
+        for (int i = 0; i < allColliders.Length; i++)
+        {
+            Collider source = allColliders[i];
+            if (source == null || !processed.Add(source) ||
+                !source.enabled || source.isTrigger ||
+                source.GetComponentInParent<IslandCollisionProxy>() != null ||
+                source.GetComponent<BlockQuad>() != null ||
+                source.GetComponentInParent<BlockQuad>() != null)
+                continue;
+
+            CreateTerrainCollider(source, root, block, proxies);
+        }
+
+        proxyColliders = boxes.ToArray();
         return proxies.ToArray();
+    }
+
+    private static Collider CreateTerrainCollider(
+        Collider source,
+        IslandBuildRoot root,
+        Block block,
+        List<GameObject> proxies)
+    {
+        if (source == null || root == null || block == null ||
+            source.GetComponentInParent<IslandCollisionProxy>() != null)
+            return null;
+
+        int terrainLayer = root.TerrainLayer;
+        if (terrainLayer < 0 || terrainLayer > 31)
+            return null;
+
+        GameObject proxy = new GameObject("IslandStaticCollision");
+        proxy.layer = terrainLayer;
+        proxy.transform.SetParent(source.transform, false);
+        proxy.transform.localPosition = Vector3.zero;
+        proxy.transform.localRotation = Quaternion.identity;
+        proxy.transform.localScale = Vector3.one;
+
+        Collider target = null;
+        BoxCollider sourceBox = source as BoxCollider;
+        MeshCollider sourceMesh = source as MeshCollider;
+        SphereCollider sourceSphere = source as SphereCollider;
+        CapsuleCollider sourceCapsule = source as CapsuleCollider;
+
+        if (sourceBox != null)
+        {
+            BoxCollider box = proxy.AddComponent<BoxCollider>();
+            box.center = sourceBox.center;
+            box.size = sourceBox.size;
+            target = box;
+        }
+        else if (sourceMesh != null && sourceMesh.sharedMesh != null)
+        {
+            MeshCollider mesh = proxy.AddComponent<MeshCollider>();
+            mesh.sharedMesh = sourceMesh.sharedMesh;
+            mesh.convex = sourceMesh.convex;
+            target = mesh;
+        }
+        else if (sourceSphere != null)
+        {
+            SphereCollider sphere = proxy.AddComponent<SphereCollider>();
+            sphere.center = sourceSphere.center;
+            sphere.radius = sourceSphere.radius;
+            target = sphere;
+        }
+        else if (sourceCapsule != null)
+        {
+            CapsuleCollider capsule = proxy.AddComponent<CapsuleCollider>();
+            capsule.center = sourceCapsule.center;
+            capsule.radius = sourceCapsule.radius;
+            capsule.height = sourceCapsule.height;
+            capsule.direction = sourceCapsule.direction;
+            target = capsule;
+        }
+
+        if (target == null)
+        {
+            UnityEngine.Object.Destroy(proxy);
+            Debug.LogWarning("[IslandLife] Неподдерживаемый физический коллайдер: " +
+                source.GetType().Name + " на " + block.name);
+            return null;
+        }
+
+        IslandCollisionProxy marker = proxy.AddComponent<IslandCollisionProxy>();
+        marker.Root = root;
+        marker.SourceBlock = block;
+
+        target.sharedMaterial = source.sharedMaterial;
+        target.isTrigger = false;
+        target.enabled = true;
+        proxies.Add(proxy);
+
+        // Оригинал сохраняется для лучей взаимодействия, но больше не является опорой игрока
+        if (sourceMesh == null || sourceMesh.convex)
+        {
+            source.isTrigger = true;
+            source.enabled = true;
+        }
+        else
+        {
+            // Неконвексный MeshCollider в Unity нельзя сделать триггером
+            source.enabled = false;
+            CreateMeshRaycastTrigger(sourceMesh, block);
+        }
+
+        return target;
+    }
+
+    private static void CreateMeshRaycastTrigger(MeshCollider source, Block block)
+    {
+        if (source == null || source.sharedMesh == null || block == null)
+            return;
+
+        Bounds meshBounds = source.sharedMesh.bounds;
+        GameObject query = new GameObject("IslandMeshRaycast");
+        query.layer = source.gameObject.layer;
+        query.transform.SetParent(source.transform, false);
+        query.transform.localPosition = Vector3.zero;
+        query.transform.localRotation = Quaternion.identity;
+        query.transform.localScale = Vector3.one;
+
+        BoxCollider box = query.AddComponent<BoxCollider>();
+        box.center = meshBounds.center;
+        box.size = meshBounds.size;
+        box.isTrigger = true;
+    }
+
+    internal static void RefreshLatePipeColliders(Block_Pipe pipeBlock)
+    {
+        if (pipeBlock == null)
+            return;
+
+        IslandBlockTag tag = pipeBlock.GetComponent<IslandBlockTag>();
+        if (tag == null || tag.Root == null)
+            return;
+
+        GameObject container = CurrentPipeColliderField != null
+            ? CurrentPipeColliderField.GetValue(pipeBlock) as GameObject
+            : null;
+        if (container == null)
+            return;
+
+        List<GameObject> newProxies = new List<GameObject>();
+        Collider[] colliders = container.GetComponentsInChildren<Collider>(true);
+        for (int i = 0; i < colliders.Length; i++)
+        {
+            Collider source = colliders[i];
+            if (source == null || !source.enabled || source.isTrigger ||
+                source.GetComponentInParent<IslandCollisionProxy>() != null ||
+                source.GetComponentInParent<BlockQuad>() != null)
+                continue;
+
+            CreateTerrainCollider(source, tag.Root, pipeBlock, newProxies);
+        }
+
+        if (newProxies.Count == 0)
+            return;
+
+        List<GameObject> all = tag.CollisionProxies != null
+            ? new List<GameObject>(tag.CollisionProxies)
+            : new List<GameObject>();
+        all.RemoveAll(item => item == null);
+        all.AddRange(newProxies);
+        tag.CollisionProxies = all.ToArray();
     }
 
     private static void SetGhostMaterial(Block ghost, bool canBuild)
