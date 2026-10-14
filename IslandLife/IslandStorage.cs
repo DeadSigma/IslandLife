@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using HMLLibrary;
 using FMODUnity;
 using System;
@@ -14,7 +14,7 @@ using UnityEngine;
 public class IslandLifeSaveData
 {
     [OptionalField]
-    public int version = 2;
+    public int version = 3;
     public List<IslandBlockRecord> blocks = new List<IslandBlockRecord>();
 }
 
@@ -51,6 +51,9 @@ public class IslandBlockRecord
     public int receiverBatteryUses;
     [OptionalField]
     public bool receiverBatteryOn;
+
+    [OptionalField]
+    public RGD_Block vanillaBlockState;
 }
 
 public static class IslandLifeStorage
@@ -130,7 +133,7 @@ public static class IslandLifeStorage
 
         if (storageHealthy && (loadedLegacy || loadedCurrent))
         {
-            data.version = 2;
+            data.version = 3;
 
             if (loadedLegacy)
             {
@@ -229,11 +232,15 @@ public static class IslandLifeStorage
                         record.health,
                         record.maxHealth,
                         record.reinforced,
-                        false
+                        false,
+                        int.MinValue,
+                        record.vanillaBlockState != null ? record.vanillaBlockState.BlockObjectIndex : 0U,
+                        record.vanillaBlockState != null ? record.vanillaBlockState.NetworkedObjectIndex : 0U
                     );
 
                 if (restored != null)
                 {
+                    RestoreVanillaBlockState(restored, record, player);
                     RestoreReceiverState(restored, record);
                     IslandLifeNetwork.BroadcastExisting(restored);
                 }
@@ -306,6 +313,250 @@ public static class IslandLifeStorage
         record.reinforced = block.Reinforced;
 
         CaptureReceiverState(record, block.GetComponentInChildren<Reciever>(true));
+        CaptureVanillaBlockState(record, block);
+    }
+
+    public static void CaptureBeforeUnload(IslandBlockTag tag)
+    {
+        if (!Raft_Network.IsHost || restoring || tag == null ||
+            string.IsNullOrEmpty(tag.RecordId) ||
+            string.IsNullOrEmpty(loadedWorldKey) || loadedWorldKey != GetWorldKey())
+            return;
+
+        IslandBlockRecord record = FindRecord(tag.RecordId);
+        if (record == null)
+            return;
+
+        Block block = tag.GetComponent<Block>();
+        if (block == null)
+            return;
+
+        try
+        {
+            FillRecord(record, block, tag);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[IslandLife] Не удалось сохранить состояние перед выгрузкой " +
+                             tag.RecordId + ": " + ex.Message);
+        }
+    }
+
+    private static void CaptureVanillaBlockState(IslandBlockRecord record, Block block)
+    {
+        if (record == null || block == null)
+            return;
+
+        try
+        {
+            RGD_Block state = block.Serialize_Save() as RGD_Block;
+            if (state != null)
+                record.vanillaBlockState = state;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[IslandLife] RGD сохранение " + block.name + ": " + ex.Message);
+        }
+    }
+
+    public static void CaptureVanillaGameState(RGD_Game game)
+    {
+        if (!Raft_Network.IsHost || game == null || game.behaviours == null)
+            return;
+
+        EnsureLoaded();
+        if (!storageHealthy)
+            return;
+
+        Dictionary<uint, IslandBlockTag> tagsByIndex = new Dictionary<uint, IslandBlockTag>();
+        IslandBlockTag[] tags = UnityEngine.Object.FindObjectsOfType<IslandBlockTag>();
+        for (int i = 0; i < tags.Length; i++)
+        {
+            IslandBlockTag tag = tags[i];
+            Block block = tag != null ? tag.GetComponent<Block>() : null;
+            if (block != null && tag.Root != null && tag.Root.Landmark != null)
+                tagsByIndex[block.ObjectIndex] = tag;
+        }
+
+        for (int i = 0; i < game.behaviours.Count; i++)
+        {
+            RGD_Block state = game.behaviours[i] as RGD_Block;
+            if (state == null)
+                continue;
+
+            IslandBlockTag tag;
+            if (!tagsByIndex.TryGetValue(state.BlockObjectIndex, out tag))
+                continue;
+
+            IslandBlockRecord record = FindRecord(tag.RecordId);
+            if (record == null)
+            {
+                record = new IslandBlockRecord { id = tag.RecordId };
+                data.blocks.Add(record);
+            }
+
+            Block block = tag.GetComponent<Block>();
+            if (block == null)
+                continue;
+
+            FillRecord(record, block, tag);
+            record.vanillaBlockState = state;
+        }
+    }
+
+    private static void RestoreVanillaBlockState(
+        Block block, IslandBlockRecord record, Network_Player player)
+    {
+        if (block == null || record == null || record.vanillaBlockState == null)
+            return;
+
+        RGD_Block state = record.vanillaBlockState;
+        Vector3 worldPosition = block.transform.position;
+        Quaternion worldRotation = block.transform.rotation;
+
+        try
+        {
+            state.RestoreBlock(block);
+            block.transform.SetPositionAndRotation(worldPosition, worldRotation);
+
+            // Дополнительные данные восстанавливаются теми же методами, что и в Raft
+            switch (state.Type)
+            {
+                case RGDType.Block_Door:
+                    (state as RGD_Door)?.Restore(block.GetComponent<Door>());
+                    break;
+                case RGDType.Block_Cropplot:
+                    (state as RGD_Cropplot)?.RestoreCropplot(
+                        block.GetComponent<Cropplot>(), player.PlantManager);
+                    break;
+                case RGDType.Block_CookingStand:
+                case RGDType.Block_Electric_CookingStand:
+                    (state as RGD_CookingStand)?.RestoreStand(block.GetComponent<Block_CookingStand>());
+                    break;
+                case RGDType.Block_Storage:
+                {
+                    Storage_Small storage = block.GetComponent<Storage_Small>();
+                    if (storage != null)
+                        (state as RGD_Storage)?.RestoreInventory(storage.GetInventoryReference());
+                    break;
+                }
+                case RGDType.Block_AnchorStationary:
+                    (state as RGD_AnchorStationary)?.RestoreAnchor(block.GetComponent<Anchor_Stationary>());
+                    break;
+                case RGDType.Block_AnchorThrowable:
+                    (state as RGD_AnchorThrowable)?.RestoreAnchorThrowable(
+                        block, block.GetComponent<Anchor_Throwable_Stand>());
+                    break;
+                case RGDType.Block_ItemCollector:
+                    (state as RGD_ItemCollector)?.RestoreItemCollector(
+                        block.GetComponentInChildren<ItemCollector>());
+                    break;
+                case RGDType.Block_Scarecrow:
+                    (state as RGD_Scarecrow)?.RestoreScarecrow(block.GetComponent<Scarecrow>());
+                    break;
+                case RGDType.Block_Brick:
+                    (state as RGD_Brick)?.RestoreBrick(block as Brick_Wet);
+                    break;
+                case RGDType.Block_BirdsNest:
+                    (state as RGD_Birdsnest)?.RestoreBirdsNest(block.GetComponent<BirdsNest>());
+                    break;
+                case RGDType.Block_ResearchTable:
+                    (state as RGD_ResearchTable)?.RestoreResearchTable(block.GetComponent<ResearchTable>());
+                    break;
+                case RGDType.Block_Sail:
+                    (state as RGD_Sail)?.RestoreSail(block.GetComponent<Sail>());
+                    break;
+                case RGDType.Block_Sharkbait:
+                    (state as RGD_Sharkbait)?.RestoreSharbait(block.GetComponent<SharkBait>());
+                    break;
+                case RGDType.Block_Reciever:
+                {
+                    Reciever receiver = block.GetComponent<Reciever>();
+                    if (receiver != null)
+                        receiver.Restore(state as RGD_Reciever);
+                    break;
+                }
+                case RGDType.ID_TrophyHolder:
+                    (state as RGDTrophyHolder)?.RestoreTrophyHolder(
+                        block.GetComponentInChildren<TrophyHolder>());
+                    break;
+                case RGDType.Block_Sprinkler:
+                {
+                    RGD_Block_Sprinkler sprinkler = state as RGD_Block_Sprinkler;
+                    if (sprinkler != null)
+                        sprinkler.rgdSprinkler.RestoreSprinkler(
+                            block.GetComponentInChildren<Sprinkler>());
+                    break;
+                }
+                case RGDType.Block_Radio:
+                {
+                    RGD_Block_Radio radio = state as RGD_Block_Radio;
+                    RadioPlayer playerRadio = block.GetComponentInChildren<RadioPlayer>();
+                    if (radio != null && playerRadio != null)
+                        playerRadio.RestoreRadio(radio.rgdRadio);
+                    break;
+                }
+                case RGDType.Block_SteeringWheel:
+                {
+                    SteeringWheel wheel = block.GetComponentInChildren<SteeringWheel>();
+                    if (wheel != null)
+                        wheel.RestoreWheel(state as RGD_SteeringWheel);
+                    break;
+                }
+                case RGDType.Block_Motor_Wheel:
+                {
+                    MotorWheel motor = block.GetComponentInChildren<MotorWheel>();
+                    if (motor != null)
+                        motor.RestoreMotor(state as RGD_MotorWheel);
+                    break;
+                }
+                case RGDType.Block_BioFuelCreator:
+                {
+                    RGD_Block_BiofuelExtractor extractor = state as RGD_Block_BiofuelExtractor;
+                    Placeable_BiofuelExtractor component = block.GetComponent<Placeable_BiofuelExtractor>();
+                    if (extractor != null && component != null)
+                        component.RestoreExtractor(extractor.rgdBioFuelCreator);
+                    break;
+                }
+                case RGDType.Block_BeeHive:
+                    (state as RGD_Block_BeeHive)?.RestoreBeehive(
+                        block.GetComponentInChildren<BeeHive>());
+                    break;
+                case RGDType.Block_BatteryCharger:
+                {
+                    RGD_Block_BatteryCharger charger = state as RGD_Block_BatteryCharger;
+                    if (charger != null)
+                        charger.rgdBatteryCharger.RestoreBatteryCharger(
+                            block.GetComponentInChildren<BatteryCharger>());
+                    break;
+                }
+                case RGDType.Block_WindTurbine:
+                {
+                    RGD_Block_WindTurbine turbine = state as RGD_Block_WindTurbine;
+                    if (turbine != null)
+                        turbine.rgdWindTurbine.Restore(
+                            block.GetComponentInChildren<WindTurbine>());
+                    break;
+                }
+                case RGDType.Block_Recycler:
+                {
+                    RGD_Block_Recycler recycler = state as RGD_Block_Recycler;
+                    Placeable_RecyclerExtractor component = block.GetComponent<Placeable_RecyclerExtractor>();
+                    if (recycler != null && component != null)
+                        component.RestoreExtractor(recycler.rgdRecycler);
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[IslandLife] RGD восстановление " + block.name +
+                             " (" + state.Type + "): " + ex);
+        }
+        finally
+        {
+            block.transform.SetPositionAndRotation(worldPosition, worldRotation);
+        }
     }
 
     private static void CaptureReceiverState(IslandBlockRecord record, Reciever reciever)
@@ -517,6 +768,7 @@ public static class IslandLifeStorage
         target.receiverBatteryItemIndex = source.receiverBatteryItemIndex;
         target.receiverBatteryUses = source.receiverBatteryUses;
         target.receiverBatteryOn = source.receiverBatteryOn;
+        target.vanillaBlockState = source.vanillaBlockState;
     }
 
     private static string GetWorldKey()
@@ -602,6 +854,8 @@ public static class SaveAndLoad_CreateRGDGame_IslandLife
         if (tags == null || tags.Length == 0)
             return;
 
+        IslandLifeStorage.CaptureVanillaGameState(__result);
+
         HashSet<uint> objectIndexes = new HashSet<uint>();
 
         for (int i = 0; i < tags.Length; i++)
@@ -628,5 +882,25 @@ public static class Reciever_OnDestroy_IslandLifeBattery
     public static void Prefix(Reciever __instance)
     {
         IslandLifeStorage.CaptureReceiverBeforeDestroy(__instance);
+    }
+}
+
+[HarmonyPatch(typeof(IslandBlockTag), "OnDisable")]
+public static class IslandBlockTag_OnDisable_SaveState
+{
+    [HarmonyPrefix]
+    public static void Prefix(IslandBlockTag __instance)
+    {
+        IslandLifeStorage.CaptureBeforeUnload(__instance);
+    }
+}
+
+[HarmonyPatch(typeof(IslandBlockTag), "OnDestroy")]
+public static class IslandBlockTag_OnDestroy_SaveState
+{
+    [HarmonyPrefix]
+    public static void Prefix(IslandBlockTag __instance)
+    {
+        IslandLifeStorage.CaptureBeforeUnload(__instance);
     }
 }
