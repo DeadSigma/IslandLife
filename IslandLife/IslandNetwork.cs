@@ -642,6 +642,16 @@ public static class IslandLifeNetwork
                     )
                 );
             }
+
+            Message_Battery insertMessage;
+            Message_Battery_OnOff onMessage;
+            GetReceiverBatteryMessages(block, player, out insertMessage, out onMessage);
+
+            if (insertMessage != null)
+                creator.MessagesStack.Add(insertMessage);
+
+            if (onMessage != null)
+                creator.MessagesStack.Add(onMessage);
         }
     }
 
@@ -731,6 +741,61 @@ public static class IslandLifeNetwork
                 Target.Other,
                 EP2PSend.k_EP2PSendReliable,
                 NetworkChannel.Channel_Game
+            );
+        }
+
+        Message_Battery insertMessage;
+        Message_Battery_OnOff onMessage;
+        GetReceiverBatteryMessages(block, host, out insertMessage, out onMessage);
+
+        if (insertMessage != null)
+            network.RPC(insertMessage, Target.Other, EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+
+        if (onMessage != null)
+            network.RPC(onMessage, Target.Other, EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+    }
+
+    private static void GetReceiverBatteryMessages(
+        Block block,
+        Network_Player host,
+        out Message_Battery insertMessage,
+        out Message_Battery_OnOff onMessage)
+    {
+        insertMessage = null;
+        onMessage = null;
+
+        if (block == null || host == null || host.Network == null)
+            return;
+
+        Reciever reciever = block.GetComponentInChildren<Reciever>(true);
+        if (reciever == null || reciever.battery == null ||
+            reciever.battery.BatterySlotIsEmpty)
+            return;
+
+        Battery battery = reciever.battery;
+        ItemInstance instance = battery.GetBatteryInstance();
+        if (instance == null)
+            return;
+
+        insertMessage = new Message_Battery(
+            Messages.Battery_Insert,
+            host.Network.NetworkIDManager,
+            host.steamID,
+            reciever.ObjectIndex,
+            instance.Uses,
+            battery.BatteryIndex,
+            instance.UniqueIndex
+        );
+
+        if (battery.On)
+        {
+            onMessage = new Message_Battery_OnOff(
+                Messages.Battery_OnOff,
+                host.Network.NetworkIDManager,
+                0UL,
+                reciever.ObjectIndex,
+                instance.Uses,
+                true
             );
         }
     }

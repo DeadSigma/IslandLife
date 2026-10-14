@@ -14,7 +14,7 @@ using UnityEngine;
 public class IslandLifeSaveData
 {
     [OptionalField]
-    public int version = 1;
+    public int version = 2;
     public List<IslandBlockRecord> blocks = new List<IslandBlockRecord>();
 }
 
@@ -40,6 +40,17 @@ public class IslandBlockRecord
     public int health;
     public int maxHealth;
     public bool reinforced;
+
+    [OptionalField]
+    public bool receiverStateSaved;
+    [OptionalField]
+    public bool receiverBatteryInstalled;
+    [OptionalField]
+    public int receiverBatteryItemIndex;
+    [OptionalField]
+    public int receiverBatteryUses;
+    [OptionalField]
+    public bool receiverBatteryOn;
 }
 
 public static class IslandLifeStorage
@@ -119,7 +130,7 @@ public static class IslandLifeStorage
 
         if (storageHealthy && (loadedLegacy || loadedCurrent))
         {
-            data.version = 1;
+            data.version = 2;
 
             if (loadedLegacy)
             {
@@ -222,7 +233,10 @@ public static class IslandLifeStorage
                     );
 
                 if (restored != null)
+                {
+                    RestoreReceiverState(restored, record);
                     IslandLifeNetwork.BroadcastExisting(restored);
+                }
             }
         }
         finally
@@ -290,6 +304,83 @@ public static class IslandLifeStorage
         record.health = block.Health;
         record.maxHealth = block.MaxHealth;
         record.reinforced = block.Reinforced;
+
+        CaptureReceiverState(record, block.GetComponentInChildren<Reciever>(true));
+    }
+
+    private static void CaptureReceiverState(IslandBlockRecord record, Reciever reciever)
+    {
+        if (record == null || reciever == null || reciever.battery == null)
+            return;
+
+        Battery battery = reciever.battery;
+        record.receiverStateSaved = true;
+        record.receiverBatteryInstalled = !battery.BatterySlotIsEmpty;
+        record.receiverBatteryOn = record.receiverBatteryInstalled && battery.On;
+
+        if (record.receiverBatteryInstalled)
+        {
+            ItemInstance instance = battery.GetBatteryInstance();
+            record.receiverBatteryItemIndex = instance.UniqueIndex;
+            record.receiverBatteryUses = instance.Uses;
+        }
+        else
+        {
+            record.receiverBatteryItemIndex = 0;
+            record.receiverBatteryUses = 0;
+        }
+    }
+
+    private static void RestoreReceiverState(Block block, IslandBlockRecord record)
+    {
+        if (block == null || record == null || !record.receiverStateSaved)
+            return;
+
+        Reciever reciever = block.GetComponentInChildren<Reciever>(true);
+        if (reciever == null || reciever.battery == null)
+            return;
+
+        Battery battery = reciever.battery;
+        if (!battery.BatterySlotIsEmpty)
+            return;
+
+        if (!record.receiverBatteryInstalled)
+        {
+            battery.On = false;
+            return;
+        }
+
+        if (record.receiverBatteryItemIndex <= 0 ||
+            ItemManager.GetItemByIndex(record.receiverBatteryItemIndex) == null)
+        {
+            Debug.LogWarning("[IslandLife] Неизвестный аккумулятор приёмника: " + record.receiverBatteryItemIndex);
+            return;
+        }
+
+        RGD_Battery savedBattery = new RGD_Battery
+        {
+            installedUniqueIndex = record.receiverBatteryItemIndex,
+            batteryUses = record.receiverBatteryUses
+        };
+
+        savedBattery.RestoreBattery(battery);
+        if (!battery.BatterySlotIsEmpty)
+            battery.On = record.receiverBatteryOn && battery.CanGiveElectricity;
+    }
+
+    public static void CaptureReceiverBeforeDestroy(Reciever reciever)
+    {
+        if (!Raft_Network.IsHost || restoring || reciever == null ||
+            string.IsNullOrEmpty(loadedWorldKey) || loadedWorldKey != GetWorldKey())
+            return;
+
+        IslandBlockTag tag = reciever.GetComponentInParent<IslandBlockTag>();
+        if (tag == null || string.IsNullOrEmpty(tag.RecordId))
+            return;
+
+        IslandBlockRecord record = FindRecord(tag.RecordId);
+        if (record != null)
+            CaptureReceiverState(record, reciever);
     }
 
     private static IslandBlockRecord FindRecord(string id)
@@ -420,6 +511,12 @@ public static class IslandLifeStorage
         target.health = source.health;
         target.maxHealth = source.maxHealth;
         target.reinforced = source.reinforced;
+
+        target.receiverStateSaved = source.receiverStateSaved;
+        target.receiverBatteryInstalled = source.receiverBatteryInstalled;
+        target.receiverBatteryItemIndex = source.receiverBatteryItemIndex;
+        target.receiverBatteryUses = source.receiverBatteryUses;
+        target.receiverBatteryOn = source.receiverBatteryOn;
     }
 
     private static string GetWorldKey()
@@ -521,5 +618,15 @@ public static class SaveAndLoad_CreateRGDGame_IslandLife
             RGD_Block blockData = rgd as RGD_Block;
             return blockData != null && objectIndexes.Contains(blockData.BlockObjectIndex);
         });
+    }
+}
+
+[HarmonyPatch(typeof(Reciever), "OnDestroy")]
+public static class Reciever_OnDestroy_IslandLifeBattery
+{
+    [HarmonyPrefix]
+    public static void Prefix(Reciever __instance)
+    {
+        IslandLifeStorage.CaptureReceiverBeforeDestroy(__instance);
     }
 }

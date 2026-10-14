@@ -1386,14 +1386,19 @@ public static class BlockCreator_Update_IslandLife
         if (restoredReinforced)
             block.Reinforced = true;
 
-        BoxCollider[] proxyColliders;
-        tag.CollisionProxies = CreateStaticCollisionProxies(
-            physicalColliders,
-            root,
-            block,
-            out proxyColliders);
+        // Временная диагностика - прокси-коллайдеры острова не создаются
+        // Исходные коллайдеры сохраняются без замены на триггеры
+        tag.CollisionProxies = new GameObject[0];
+        block.blockColliders = physicalColliders;
+        for (int i = 0; i < physicalColliders.Length; i++)
+        {
+            if (physicalColliders[i] != null)
+                physicalColliders[i].enabled = true;
+        }
 
-        block.blockColliders = proxyColliders;
+        Debug.Log("[IslandLife][InteractionTest] No collision proxies: " +
+            block.name + " id=" + block.ObjectIndex +
+            " colliders=" + physicalColliders.Length);
 
         if (block.occupyingComponent != null)
             block.occupyingComponent.RestoreToDefaultMaterial();

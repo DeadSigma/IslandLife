@@ -18,7 +18,14 @@ public class IslandLife : Mod
     {
         harmony = new Harmony("el_neuman.islandlife");
         harmony.PatchAll();
+        IslandReceiverTracking.InitializeNetworking(this, harmony);
         Debug.Log("[IslandLife] Loaded");
+    }
+
+    public void Update()
+    {
+        IslandReceiverTracking.Update();
+        IslandReceiverRenameWindow.Update();
     }
 
     public void OnGUI()
@@ -28,7 +35,11 @@ public class IslandLife : Mod
 
     public void OnModUnload()
     {
+        IslandReceiverRenameWindow.Reset();
         IslandLifeStorage.SaveCurrentWorld();
+        IslandReceiverTracking.Save();
+        IslandReceiverTracking.Reset();
+        IslandReceiverTracking.ShutdownNetworking();
 
         if (harmony != null)
             harmony.UnpatchAll(harmony.Id);
