@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using HMLLibrary;
 using FMODUnity;
 using System;
@@ -35,6 +35,7 @@ public class IslandLife : Mod
 
     public void OnModUnload()
     {
+        BlockCreator_Update_IslandLife.ResetHeightAdjustment();
         IslandReceiverRenameWindow.Reset();
         IslandLifeStorage.SaveCurrentWorld();
         IslandReceiverTracking.Save();

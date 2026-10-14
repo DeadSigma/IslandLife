@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using HMLLibrary;
 using FMODUnity;
 using System;
@@ -19,6 +19,8 @@ public static class BlockCreator_Update_IslandLife
     private static readonly FieldInfo SelectedBuildablePrefabField = AccessTools.Field(typeof(BlockCreator), "selectedBuildablePrefab");
     private static readonly FieldInfo ColliderPrefabEnablerField = AccessTools.Field(typeof(BlockCreator), "colliderPrefabEnabler");
     private static readonly FieldInfo CurrentPipeColliderField = AccessTools.Field(typeof(Block_Pipe), "currentPipeCollider");
+    private static readonly FieldInfo IsRotatingField = AccessTools.Field(typeof(BlockCreator), "isRotating");
+    private static readonly FieldInfo RotationAccumulationField = AccessTools.Field(typeof(BlockCreator), "rotationKeyAccumulation");
 
     private static readonly MethodInfo HandleRotationMethod = AccessTools.Method(typeof(BlockCreator), "HandleRotationOfSelectedBlock");
     private static readonly MethodInfo HandleMirroredMethod = AccessTools.Method(typeof(BlockCreator), "HandleMirroredVersion");
@@ -26,12 +28,335 @@ public static class BlockCreator_Update_IslandLife
 
     private const float GroundClearance = 0.001f;
     private const float MinGroundNormalY = 0.55f;
+    private const float HeightStep = 0.25f;
+    private const float MaxHeightOffset = 50f;
+    private const float HeightMouseSensitivity = 0.1f;
+    private const float TiltMouseSensitivity = 4f;
+    private const float HeightMousePixelsSensitivity = 0.015f;
+    private const float TiltMousePixelsSensitivity = 0.35f;
+    private const float TiltScrollStep = 5f;
+
+    private static BlockCreator heightCreator;
+    private static Item_Base heightItem;
+    private static float heightOffset;
+    private static float tiltX;
+    private static float tiltZ;
+    private static int lastTransformInputFrame = -1;
+    private static int lastIslandBuildFrame = -1;
+    private static int previousDragMode;
+    private static bool suppressVanillaRotation;
+    private static int lastResetFrame = -1;
+    private static Network_Player mouseLookLockedPlayer;
+    private static bool mouseLookupDone;
+    private static PropertyInfo mouseCurrentProperty;
+    private static PropertyInfo mouseDeltaProperty;
+    private static MethodInfo mouseReadValueMethod;
+
+    private static bool IsHeightKeyHeld()
+    {
+        return Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+    }
+
+    private static bool IsResetModifierHeld()
+    {
+        return Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+    }
+
+    private static bool ResetShortcutPressed()
+    {
+        return (IsResetModifierHeld() && Input.GetKeyDown(KeyCode.R)) ||
+               (Input.GetKey(KeyCode.R) &&
+                (Input.GetKeyDown(KeyCode.LeftControl) || Input.GetKeyDown(KeyCode.RightControl)));
+    }
+
+    private static bool IsTiltXHeld()
+    {
+        return Input.GetKey(KeyCode.X);
+    }
+
+    private static bool IsTiltZHeld()
+    {
+        return Input.GetKey(KeyCode.Z);
+    }
+
+    private static bool IsAdjustmentKeyHeld()
+    {
+        return IsHeightKeyHeld() || IsTiltXHeld() || IsTiltZHeld();
+    }
+
+    internal static void ResetHeightAdjustment()
+    {
+        ReleaseMouseLookLock();
+        heightCreator = null;
+        heightItem = null;
+        heightOffset = 0f;
+        tiltX = 0f;
+        tiltZ = 0f;
+        lastTransformInputFrame = -1;
+        lastIslandBuildFrame = -1;
+        previousDragMode = 0;
+        suppressVanillaRotation = false;
+        lastResetFrame = -1;
+    }
+
+    private static void TrackHeightSelection(BlockCreator creator, Item_Base item)
+    {
+        if (heightCreator == creator && heightItem == item)
+            return;
+
+        ResetHeightAdjustment();
+        heightCreator = creator;
+        heightItem = item;
+    }
+
+    private static void UpdateMouseLookLock()
+    {
+        Network_Player player = heightCreator != null ? heightCreator.GetPlayerNetwork() : null;
+        if (player == null || !player.IsLocalPlayer || player.PlayerScript == null)
+        {
+            ReleaseMouseLookLock();
+            return;
+        }
+
+        if (!IsAdjustmentKeyHeld())
+        {
+            ReleaseMouseLookLock();
+            return;
+        }
+
+        if (mouseLookLockedPlayer != null && mouseLookLockedPlayer != player)
+            ReleaseMouseLookLock();
+
+        // Игра может включить обзор после отпускания R - блокировка восстанавливается
+        if (mouseLookLockedPlayer != player || Input.GetKeyUp(KeyCode.R))
+            player.PlayerScript.SetMouseLookScripts(false);
+
+        mouseLookLockedPlayer = player;
+    }
+
+    private static void ReleaseMouseLookLock()
+    {
+        Network_Player player = mouseLookLockedPlayer;
+        mouseLookLockedPlayer = null;
+        if (player == null || player.PlayerScript == null)
+            return;
+
+        // Ванильный R самостоятельно управляет блокировкой до отпускания
+        BlockCreator creator = player.BlockCreator;
+        if (creator == null || !creator.IsRotating)
+            player.PlayerScript.SetMouseLookScripts(true);
+    }
+
+    internal static void OnCreatorDisabled(BlockCreator creator)
+    {
+        if (creator == null || creator != heightCreator)
+            return;
+
+        Network_Player player = creator.GetPlayerNetwork();
+        if (IsRotatingField != null)
+            IsRotatingField.SetValue(creator, false);
+        if (RotationAccumulationField != null)
+            RotationAccumulationField.SetValue(creator, 0f);
+
+        ResetHeightAdjustment();
+        if (player != null && player.PlayerScript != null)
+            player.PlayerScript.SetMouseLookScripts(true);
+    }
+
+    private static void ResetCurrentTransform(BlockCreator creator)
+    {
+        heightOffset = 0f;
+        tiltX = 0f;
+        tiltZ = 0f;
+        previousDragMode = 0;
+        lastTransformInputFrame = Time.frameCount;
+
+        Block prefab = SelectedBuildablePrefabField.GetValue(creator) as Block;
+        if (prefab != null)
+            prefab.currentRotationY = prefab.transform.eulerAngles.y;
+
+        // Состояние R сбрасывается, чтобы после Ctrl + R не продолжалось вращение
+        if (IsRotatingField != null)
+            IsRotatingField.SetValue(creator, false);
+        if (RotationAccumulationField != null)
+            RotationAccumulationField.SetValue(creator, 0f);
+
+        Network_Player player = creator.GetPlayerNetwork();
+        if (player != null && player.PlayerScript != null && !IsAdjustmentKeyHeld())
+            player.PlayerScript.SetMouseLookScripts(true);
+    }
+
+    private static float GetMouseVerticalDelta(out bool pixels)
+    {
+        pixels = false;
+
+        // Unity Input System сохраняет смещение даже при заблокированном курсоре
+        if (!mouseLookupDone)
+        {
+            mouseLookupDone = true;
+            Type mouseType = Type.GetType("UnityEngine.InputSystem.Mouse, Unity.InputSystem", false);
+            if (mouseType != null)
+            {
+                mouseCurrentProperty = mouseType.GetProperty("current",
+                    BindingFlags.Public | BindingFlags.Static);
+                mouseDeltaProperty = mouseType.GetProperty("delta",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (mouseDeltaProperty != null)
+                    mouseReadValueMethod = mouseDeltaProperty.PropertyType.GetMethod("ReadValue",
+                        BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+            }
+        }
+
+        if (mouseCurrentProperty != null && mouseDeltaProperty != null && mouseReadValueMethod != null)
+        {
+            try
+            {
+                object mouse = mouseCurrentProperty.GetValue(null, null);
+                if (mouse != null)
+                {
+                    object deltaControl = mouseDeltaProperty.GetValue(mouse, null);
+                    object value = deltaControl != null ? mouseReadValueMethod.Invoke(deltaControl, null) : null;
+                    if (value is Vector2)
+                    {
+                        pixels = true;
+                        return ((Vector2)value).y;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                mouseCurrentProperty = null;
+            }
+        }
+
+        try
+        {
+            return Input.GetAxisRaw("Mouse Y");
+        }
+        catch (InvalidOperationException)
+        {
+            return 0f;
+        }
+        catch (ArgumentException)
+        {
+            return 0f;
+        }
+    }
+
+    private static void ApplyPlacementAdjustment(Block ghost)
+    {
+        if (ghost == null)
+            return;
+
+        lastIslandBuildFrame = Time.frameCount;
+
+        if (lastTransformInputFrame != Time.frameCount)
+        {
+            lastTransformInputFrame = Time.frameCount;
+
+            bool alt = IsHeightKeyHeld();
+            bool x = IsTiltXHeld();
+            bool z = IsTiltZHeld();
+
+            int dragMode = (alt ? 1 : 0) | (x ? 2 : 0) | (z ? 4 : 0);
+            bool mousePixels = false;
+            float mouseY = dragMode == previousDragMode && dragMode != 0
+                ? GetMouseVerticalDelta(out mousePixels)
+                : 0f;
+            if (dragMode != previousDragMode || dragMode == 0)
+                mousePixels = false;
+            previousDragMode = dragMode;
+
+            float heightMouseStep = mousePixels ? HeightMousePixelsSensitivity : HeightMouseSensitivity;
+            float tiltMouseStep = mousePixels ? TiltMousePixelsSensitivity : TiltMouseSensitivity;
+            float wheel = Input.mouseScrollDelta.y;
+            float wheelDirection = Mathf.Abs(wheel) > 0.0001f ? -Mathf.Sign(wheel) : 0f;
+
+            if (alt)
+            {
+                // Смещение сохраняется после отпускания Alt
+                heightOffset = Mathf.Clamp(
+                    heightOffset + mouseY * heightMouseStep + wheelDirection * HeightStep,
+                    -MaxHeightOffset,
+                    MaxHeightOffset);
+            }
+
+            if (x)
+            {
+                // Вращение выполняется вокруг локальной оси X
+                tiltX = Mathf.Repeat(
+                    tiltX + mouseY * tiltMouseStep + wheelDirection * TiltScrollStep + 180f,
+                    360f) - 180f;
+            }
+
+            if (z)
+            {
+                // Вращение выполняется вокруг локальной оси Z
+                tiltZ = Mathf.Repeat(
+                    tiltZ + mouseY * tiltMouseStep + wheelDirection * TiltScrollStep + 180f,
+                    360f) - 180f;
+            }
+        }
+
+        UpdateMouseLookLock();
+
+        // Базовый поворот уже вычислен сеткой или рельефом
+        ghost.transform.rotation *= Quaternion.Euler(tiltX, 0f, tiltZ);
+        ghost.transform.position += Vector3.up * heightOffset;
+    }
+
+    internal static bool SuppressHotbarScroll()
+    {
+        if (!IsAdjustmentKeyHeld() ||
+            CanvasHelper.ActiveMenu != MenuType.None ||
+            Mathf.Abs(Input.mouseScrollDelta.y) <= 0.0001f ||
+            heightCreator == null ||
+            heightItem == null ||
+            heightCreator.selectedBlock == null)
+        {
+            return false;
+        }
+
+        if (lastIslandBuildFrame >= 0 &&
+            Time.frameCount - lastIslandBuildFrame <= 1)
+        {
+            return true;
+        }
+
+        Camera camera = global::Helper.MainCamera;
+        if (camera == null)
+            return false;
+
+        Ray ray = camera.ScreenPointToRay(
+            new Vector3(Screen.width / 2f, Screen.height / 2f));
+        RaycastHit[] hits = Physics.RaycastAll(
+            ray, Player.UseDistance * 2f, ~0, QueryTriggerInteraction.Ignore);
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Collider collider = hits[i].collider;
+            if (collider != null &&
+                (collider.GetComponentInParent<IslandBuildRoot>() != null ||
+                 collider.GetComponentInParent<Landmark>() != null))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     [HarmonyPrefix]
     public static bool Prefix(BlockCreator __instance, Item_Base ___selectedBuildableItem, Network_Player ___playerNetwork)
     {
-        if (__instance == null || ___playerNetwork == null || !___playerNetwork.IsLocalPlayer || ___selectedBuildableItem == null)
+        if (__instance == null || ___playerNetwork == null || !___playerNetwork.IsLocalPlayer)
             return true;
+
+        if (___selectedBuildableItem == null)
+        {
+            ReleaseMouseLookLock();
+            return true;
+        }
 
         IslandGridMode.HandleInput();
 
@@ -40,6 +365,11 @@ public static class BlockCreator_Update_IslandLife
             RestoreGhostToRaftPivot(__instance);
             return true;
         }
+
+        TrackHeightSelection(__instance, ___selectedBuildableItem);
+
+        if (IsAdjustmentKeyHeld() && lastIslandBuildFrame >= Time.frameCount - 1)
+            UpdateMouseLookLock();
 
         ColliderPrefabEnabler colliderEnabler = ColliderPrefabEnablerField.GetValue(__instance) as ColliderPrefabEnabler;
         if (colliderEnabler != null)
@@ -205,6 +535,20 @@ public static class BlockCreator_Update_IslandLife
         if (ghost == null)
             return;
 
+        if (ResetShortcutPressed() && lastResetFrame != Time.frameCount)
+        {
+            lastResetFrame = Time.frameCount;
+            ResetCurrentTransform(creator);
+            suppressVanillaRotation = true;
+        }
+
+        if (suppressVanillaRotation)
+        {
+            if (!Input.GetKey(KeyCode.R))
+                suppressVanillaRotation = false;
+            return;
+        }
+
         Item_Base item = ghost.buildableItem;
         bool freeRotation = item != null &&
                             item.settings_buildable != null &&
@@ -238,6 +582,7 @@ public static class BlockCreator_Update_IslandLife
 
     private static void RestoreGhostToRaftPivot(BlockCreator creator)
     {
+        ReleaseMouseLookLock();
         if (creator == null || creator.selectedBlock == null)
             return;
 
@@ -740,6 +1085,7 @@ public static class BlockCreator_Update_IslandLife
         BlockCreator creator, Network_Player player, Block ghost,
         IslandBuildRoot root, DPS dpsType)
     {
+        ApplyPlacementAdjustment(ghost);
         creator.SetGhostBlockVisibility(true);
 
         bool canBuild = CanBuildOnIsland(creator, ghost, root);
@@ -848,6 +1194,7 @@ public static class BlockCreator_Update_IslandLife
                 SnapStructuralGhostToGrid(ghost, gridOrigin, gridRotation);
         }
 
+        ApplyPlacementAdjustment(ghost);
         creator.SetGhostBlockVisibility(true);
         bool canBuild = creator.HasEnoughResourcesToBuild(ghost);
         SetGhostMaterial(ghost, canBuild);
@@ -1801,5 +2148,36 @@ internal static class IslandLife_FindInteractable_IgnoreCollisionProxies
         RaycastInteractable_Redirect redirect =
             nearestCollider.GetComponent<RaycastInteractable_Redirect>();
         return redirect != null ? redirect.RaycastInteractable : null;
+    }
+}
+
+
+// Колесо не переключает слот во время регулировки высоты или наклона
+[HarmonyPatch]
+internal static class IslandLife_Hotbar_HeightScroll
+{
+    [HarmonyTargetMethods]
+    private static IEnumerable<MethodBase> TargetMethods()
+    {
+        MethodInfo update = AccessTools.Method(typeof(Hotbar), "Update");
+        if (update != null)
+            yield return update;
+    }
+
+    [HarmonyPrefix]
+    private static bool Prefix()
+    {
+        return !BlockCreator_Update_IslandLife.SuppressHotbarScroll();
+    }
+}
+
+
+[HarmonyPatch(typeof(BlockCreator), "OnDisable")]
+internal static class IslandLife_CreatorDisable_MouseLock
+{
+    [HarmonyPostfix]
+    private static void Postfix(BlockCreator __instance)
+    {
+        BlockCreator_Update_IslandLife.OnCreatorDisabled(__instance);
     }
 }

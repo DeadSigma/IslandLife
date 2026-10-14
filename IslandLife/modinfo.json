@@ -6,5 +6,5 @@
   "requiredByAllPlayers": true,
   "icon": "icon.png",
   "banner": "banner.png",
-  "isModPermanent": false
+  "isModPermanent": true
 }
