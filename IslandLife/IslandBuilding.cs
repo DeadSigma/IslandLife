@@ -1386,19 +1386,10 @@ public static class BlockCreator_Update_IslandLife
         if (restoredReinforced)
             block.Reinforced = true;
 
-        // Временная диагностика - прокси-коллайдеры острова не создаются
-        // Исходные коллайдеры сохраняются без замены на триггеры
-        tag.CollisionProxies = new GameObject[0];
-        block.blockColliders = physicalColliders;
-        for (int i = 0; i < physicalColliders.Length; i++)
-        {
-            if (physicalColliders[i] != null)
-                physicalColliders[i].enabled = true;
-        }
-
-        Debug.Log("[IslandLife][InteractionTest] No collision proxies: " +
-            block.name + " id=" + block.ObjectIndex +
-            " colliders=" + physicalColliders.Length);
+        BoxCollider[] proxyColliders;
+        tag.CollisionProxies = CreateStaticCollisionProxies(
+            physicalColliders, root, block, out proxyColliders);
+        block.blockColliders = proxyColliders;
 
         if (block.occupyingComponent != null)
             block.occupyingComponent.RestoreToDefaultMaterial();
@@ -1722,5 +1713,93 @@ public static class BlockCreator_Update_IslandLife
         Material material = canBuild ? gameManager.ghostMaterialGreen : gameManager.ghostMaterialRed;
         if (material != null)
             ghost.occupyingComponent.SetNewMaterial(material);
+    }
+}
+
+
+[HarmonyPatch(typeof(global::Helper), "FindInteractable")]
+internal static class IslandLife_FindInteractable_IgnoreCollisionProxies
+{
+    [HarmonyPostfix]
+    private static void Postfix(
+        float interactDistance,
+        QueryTriggerInteraction queryTriggerInteraction,
+        ref RaycastInteractable __result)
+    {
+        if (__result != null || global::Helper.MainCamera == null || interactDistance <= 0f)
+            return;
+
+        Ray ray = global::Helper.MainCamera.ScreenPointToRay(
+            new Vector3(Screen.width / 2f, Screen.height / 2f));
+
+        RaycastHit firstHit;
+        if (!Physics.Raycast(
+                ray,
+                out firstHit,
+                interactDistance,
+                LayerMasks.MASK_RaycastInteractable,
+                queryTriggerInteraction) ||
+            firstHit.collider == null ||
+            firstHit.collider.GetComponentInParent<IslandCollisionProxy>() == null)
+        {
+            return;
+        }
+
+        bool foundCollider;
+        __result = FindOriginalInteractable(
+            ray, interactDistance, queryTriggerInteraction, out foundCollider);
+
+        if (!foundCollider)
+        {
+            Ray reverseRay = new Ray(
+                ray.origin + ray.direction.normalized * interactDistance,
+                -ray.direction);
+
+            __result = FindOriginalInteractable(
+                reverseRay, interactDistance, queryTriggerInteraction, out foundCollider);
+        }
+    }
+
+    private static RaycastInteractable FindOriginalInteractable(
+        Ray ray,
+        float interactDistance,
+        QueryTriggerInteraction queryTriggerInteraction,
+        out bool foundCollider)
+    {
+        foundCollider = false;
+        RaycastHit[] hits = Physics.RaycastAll(
+            ray,
+            interactDistance,
+            LayerMasks.MASK_RaycastInteractable,
+            queryTriggerInteraction);
+
+        float nearestDistance = float.MaxValue;
+        Collider nearestCollider = null;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Collider collider = hits[i].collider;
+            if (collider == null ||
+                collider.GetComponentInParent<IslandCollisionProxy>() != null ||
+                hits[i].distance >= nearestDistance)
+            {
+                continue;
+            }
+
+            nearestDistance = hits[i].distance;
+            nearestCollider = collider;
+        }
+
+        if (nearestCollider == null)
+            return null;
+
+        foundCollider = true;
+        RaycastInteractable interactable = nearestCollider.GetComponent<RaycastInteractable>();
+        if (interactable != null)
+            return interactable;
+
+        RaycastInteractable_Redirect redirect =
+            nearestCollider.GetComponent<RaycastInteractable_Redirect>();
+        return redirect != null ? redirect.RaycastInteractable : null;
     }
 }
