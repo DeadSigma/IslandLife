@@ -358,6 +358,14 @@ public static class BlockCreator_Update_IslandLife
             return true;
         }
 
+        // Исключённые предметы передаются ванильному строительству без изменений
+        if (!CanStartIslandBuild(___selectedBuildableItem))
+        {
+            if (heightCreator == __instance)
+                ResetHeightAdjustment();
+            return true;
+        }
+
         IslandGridMode.HandleInput();
 
         if (CanvasHelper.ActiveMenu != MenuType.None || MyInput.GetButtonDown("RMB") || MyInput.GetButtonUp("RMB"))
@@ -452,12 +460,6 @@ public static class BlockCreator_Update_IslandLife
 
                 return false;
             }
-        }
-
-        if (!CanStartIslandBuild(___selectedBuildableItem))
-        {
-            RestoreGhostToRaftPivot(__instance);
-            return true;
         }
 
         RaycastHit terrainHit;
@@ -1880,6 +1882,21 @@ public static class BlockCreator_Update_IslandLife
             }
         }
 
+        // Коллайдер двери сохраняется даже при её временном отключении
+        Door[] doors = block.GetComponentsInChildren<Door>(true);
+        for (int i = 0; i < doors.Length; i++)
+        {
+            Collider doorCollider = IslandLife_DoorProxySync.GetDoorCollider(doors[i]);
+            if (doorCollider == null || doorCollider.isTrigger ||
+                !processed.Add(doorCollider))
+                continue;
+
+            Collider physical = CreateTerrainCollider(doorCollider, root, block, proxies);
+            BoxCollider box = physical as BoxCollider;
+            if (box != null)
+                boxes.Add(box);
+        }
+
         // Многие предметы и лестницы используют отдельные Box/Mesh/Sphere/CapsuleCollider
         Collider[] allColliders = block.GetComponentsInChildren<Collider>(true);
         for (int i = 0; i < allColliders.Length; i++)
@@ -1969,6 +1986,16 @@ public static class BlockCreator_Update_IslandLife
         marker.Root = root;
         marker.SourceBlock = block;
 
+        // Прокси двери переключается вместе с её ванильным коллайдером
+        Door ownerDoor;
+        IslandDoorCollisionLink doorLink = null;
+        if (IslandLife_DoorProxySync.TryFindDoor(block, source, out ownerDoor))
+        {
+            doorLink = proxy.AddComponent<IslandDoorCollisionLink>();
+            doorLink.OwnerDoor = ownerDoor;
+            doorLink.ProxyCollider = target;
+        }
+
         target.sharedMaterial = source.sharedMaterial;
         target.isTrigger = false;
         target.enabled = true;
@@ -1986,6 +2013,9 @@ public static class BlockCreator_Update_IslandLife
             source.enabled = false;
             CreateMeshRaycastTrigger(sourceMesh, block);
         }
+
+        if (doorLink != null)
+            doorLink.Sync();
 
         return target;
     }
@@ -2179,5 +2209,93 @@ internal static class IslandLife_CreatorDisable_MouseLock
     private static void Postfix(BlockCreator __instance)
     {
         BlockCreator_Update_IslandLife.OnCreatorDisabled(__instance);
+    }
+}
+
+
+// Дверной прокси следует состоянию оригинальной двери
+internal sealed class IslandDoorCollisionLink : MonoBehaviour
+{
+    internal Door OwnerDoor;
+    internal Collider ProxyCollider;
+
+    internal void Sync()
+    {
+        if (OwnerDoor != null && ProxyCollider != null)
+            ProxyCollider.enabled = !OwnerDoor.open;
+    }
+}
+
+internal static class IslandLife_DoorProxySync
+{
+    private static readonly FieldInfo DoorColliderField =
+        AccessTools.Field(typeof(Door), "doorCollider");
+
+    internal static Collider GetDoorCollider(Door door)
+    {
+        if (door == null || DoorColliderField == null)
+            return null;
+
+        return DoorColliderField.GetValue(door) as Collider;
+    }
+
+    internal static bool TryFindDoor(Block block, Collider source, out Door owner)
+    {
+        owner = null;
+        if (block == null || source == null)
+            return false;
+
+        Door[] doors = block.GetComponentsInChildren<Door>(true);
+        for (int i = 0; i < doors.Length; i++)
+        {
+            Door door = doors[i];
+            if (GetDoorCollider(door) != source)
+                continue;
+
+            owner = door;
+            return true;
+        }
+
+        return false;
+    }
+
+    internal static void Refresh(Door door)
+    {
+        if (door == null)
+            return;
+
+        IslandBlockTag tag = door.GetComponentInParent<IslandBlockTag>();
+        if (tag == null)
+            return;
+
+        IslandDoorCollisionLink[] links =
+            tag.GetComponentsInChildren<IslandDoorCollisionLink>(true);
+
+        for (int i = 0; i < links.Length; i++)
+        {
+            IslandDoorCollisionLink link = links[i];
+            if (link != null && link.OwnerDoor == door)
+                link.Sync();
+        }
+    }
+}
+
+[HarmonyPatch(typeof(Door), "Open")]
+internal static class IslandLife_Door_Open_Collision
+{
+    [HarmonyPostfix]
+    private static void Postfix(Door __instance)
+    {
+        IslandLife_DoorProxySync.Refresh(__instance);
+    }
+}
+
+[HarmonyPatch(typeof(Door), "Close")]
+internal static class IslandLife_Door_Close_Collision
+{
+    [HarmonyPostfix]
+    private static void Postfix(Door __instance)
+    {
+        IslandLife_DoorProxySync.Refresh(__instance);
     }
 }
