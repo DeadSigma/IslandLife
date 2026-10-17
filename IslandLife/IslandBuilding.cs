@@ -358,14 +358,6 @@ public static class BlockCreator_Update_IslandLife
             return true;
         }
 
-        // Исключённые предметы передаются ванильному строительству без изменений
-        if (!CanStartIslandBuild(___selectedBuildableItem))
-        {
-            if (heightCreator == __instance)
-                ResetHeightAdjustment();
-            return true;
-        }
-
         IslandGridMode.HandleInput();
 
         if (CanvasHelper.ActiveMenu != MenuType.None || MyInput.GetButtonDown("RMB") || MyInput.GetButtonUp("RMB"))
@@ -460,6 +452,12 @@ public static class BlockCreator_Update_IslandLife
 
                 return false;
             }
+        }
+
+        if (!CanStartIslandBuild(___selectedBuildableItem))
+        {
+            RestoreGhostToRaftPivot(__instance);
+            return true;
         }
 
         RaycastHit terrainHit;
@@ -1722,6 +1720,7 @@ public static class BlockCreator_Update_IslandLife
         }
 
         block.OnFinishedPlacement();
+        IslandLife_LightIsolation.RefreshBlock(block);
 
         if (playPlacementSound)
             PlayPlacementSound(creator, item, block.transform.position);
@@ -2297,5 +2296,321 @@ internal static class IslandLife_Door_Close_Collision
     private static void Postfix(Door __instance)
     {
         IslandLife_DoorProxySync.Refresh(__instance);
+    }
+}
+
+// Источники света острова отделяются от координат плота
+internal static class IslandLife_LightIsolation
+{
+    internal static void RefreshBlock(Block block)
+    {
+        if (block == null)
+            return;
+
+        LightSingularityExternal[] lights =
+            block.GetComponentsInChildren<LightSingularityExternal>(true);
+        for (int i = 0; i < lights.Length; i++)
+        {
+            LightSingularityExternal light = lights[i];
+            if (light != null && light.MorphedLightSingularity != null)
+                ConfigureAnchor(light.MorphedLightSingularity);
+        }
+    }
+
+    internal static IslandBuildRoot RootOf(LightSingularityExternal external)
+    {
+        if (external == null)
+            return null;
+
+        IslandBlockTag tag = external.GetComponentInParent<IslandBlockTag>();
+        return tag != null ? tag.Root : null;
+    }
+
+    internal static IslandBuildRoot RootOf(Transform transform)
+    {
+        if (transform == null)
+            return null;
+
+        IslandBlockTag tag = transform.GetComponentInParent<IslandBlockTag>();
+        if (tag != null)
+            return tag.Root;
+
+        LightSingularityExternal external =
+            transform.GetComponentInParent<LightSingularityExternal>();
+        if (external != null)
+            return RootOf(external);
+
+        LightSingularity singularity = transform.GetComponentInParent<LightSingularity>();
+        if (singularity != null)
+        {
+            bool hasExternals;
+            bool mixed;
+            return CommonRoot(singularity, out hasExternals, out mixed);
+        }
+
+        return null;
+    }
+
+    internal static IslandBuildRoot CommonRoot(
+        LightSingularity singularity, out bool hasExternals, out bool mixed)
+    {
+        hasExternals = false;
+        mixed = false;
+        IslandBuildRoot root = null;
+
+        if (singularity == null)
+            return null;
+
+        List<LightSingularityExternal> externals = singularity.GetExternals();
+        if (externals == null)
+            return null;
+
+        for (int i = 0; i < externals.Count; i++)
+        {
+            LightSingularityExternal external = externals[i];
+            if (external == null)
+                continue;
+
+            IslandBuildRoot next = RootOf(external);
+            if (!hasExternals)
+            {
+                root = next;
+                hasExternals = true;
+            }
+            else if (root != next)
+            {
+                mixed = true;
+                return null;
+            }
+        }
+
+        return root;
+    }
+
+    internal static bool SameArea(LightSingularity source, LightSingularityExternal external)
+    {
+        bool hasExternals;
+        bool mixed;
+        IslandBuildRoot sourceRoot = CommonRoot(source, out hasExternals, out mixed);
+        return hasExternals && !mixed && sourceRoot == RootOf(external);
+    }
+
+    internal static bool SameArea(Transform a, Transform b)
+    {
+        return RootOf(a) == RootOf(b);
+    }
+
+    internal static void FilterNearby(
+        List<GameObject> lights, IslandBuildRoot sourceRoot)
+    {
+        if (lights == null)
+            return;
+
+        for (int i = lights.Count - 1; i >= 0; i--)
+        {
+            GameObject obj = lights[i];
+            LightSingularityExternal external =
+                obj != null ? obj.GetComponent<LightSingularityExternal>() : null;
+            if (external == null || RootOf(external) != sourceRoot)
+                lights.RemoveAt(i);
+        }
+    }
+
+    internal static void ConfigureAnchor(LightSingularity singularity)
+    {
+        if (singularity == null)
+            return;
+
+        bool hasExternals;
+        bool mixed;
+        IslandBuildRoot root = CommonRoot(singularity, out hasExternals, out mixed);
+        IslandLife_IslandLightFollower follower =
+            singularity.GetComponent<IslandLife_IslandLightFollower>();
+
+        if (!hasExternals || mixed || root == null)
+        {
+            if (follower != null)
+                follower.enabled = false;
+            return;
+        }
+
+        // Объект из пула не привязывается к острову - остров может выгрузиться
+        if (singularity.transform.parent != null)
+            singularity.transform.SetParent(null, true);
+
+        if (follower == null)
+            follower = singularity.gameObject.AddComponent<IslandLife_IslandLightFollower>();
+
+        follower.Source = singularity;
+        follower.enabled = true;
+    }
+}
+
+internal sealed class IslandLife_IslandLightFollower : MonoBehaviour
+{
+    internal LightSingularity Source;
+
+    private void LateUpdate()
+    {
+        if (Source == null)
+            return;
+
+        bool hasExternals;
+        bool mixed;
+        IslandBuildRoot root =
+            IslandLife_LightIsolation.CommonRoot(Source, out hasExternals, out mixed);
+        if (!hasExternals || mixed || root == null)
+        {
+            enabled = false;
+            return;
+        }
+
+        List<LightSingularityExternal> externals = Source.GetExternals();
+        if (externals == null)
+            return;
+
+        Vector3 total = Vector3.zero;
+        int count = 0;
+        for (int i = 0; i < externals.Count; i++)
+        {
+            LightSingularityExternal external = externals[i];
+            if (external == null || external.lightOffsetPosition == null)
+                continue;
+
+            total += external.lightOffsetPosition.position;
+            count++;
+        }
+
+        if (count > 0)
+            Source.transform.position = total / count;
+    }
+}
+
+[HarmonyPatch(typeof(LightSingularity), "AverageOutSingularityPosition")]
+internal static class IslandLife_SingularityPosition
+{
+    [HarmonyPostfix]
+    private static void Postfix(LightSingularity __instance)
+    {
+        IslandLife_LightIsolation.ConfigureAnchor(__instance);
+    }
+}
+
+[HarmonyPatch(typeof(LightSingularityManager), "FindNearbyLights",
+    new Type[] { typeof(LightSingularityExternal), typeof(float), typeof(bool) })]
+internal static class IslandLife_LightNearbyExternal
+{
+    [HarmonyPostfix]
+    private static void Postfix(LightSingularityExternal from, List<GameObject> __result)
+    {
+        if (from != null)
+            IslandLife_LightIsolation.FilterNearby(
+                __result, IslandLife_LightIsolation.RootOf(from));
+    }
+}
+
+[HarmonyPatch(typeof(LightSingularityManager), "FindNearbyLights",
+    new Type[] { typeof(Transform), typeof(float), typeof(bool) })]
+internal static class IslandLife_LightNearbyTransform
+{
+    [HarmonyPostfix]
+    private static void Postfix(Transform from, List<GameObject> __result)
+    {
+        if (from != null)
+            IslandLife_LightIsolation.FilterNearby(
+                __result, IslandLife_LightIsolation.RootOf(from));
+    }
+}
+
+[HarmonyPatch(typeof(LightSingularityManager), "FindClosestViableSingularity")]
+internal static class IslandLife_LightClosestSingularity
+{
+    [HarmonyPostfix]
+    private static void Postfix(
+        LightSingularityManager __instance,
+        List<LightSingularity> p_singularities,
+        LightSingularityExternal p_to,
+        ref LightSingularity __result)
+    {
+        if (p_to == null || __result == null ||
+            IslandLife_LightIsolation.SameArea(__result, p_to))
+            return;
+
+        __result = null;
+        float best = float.PositiveInfinity;
+        for (int i = 0; i < p_singularities.Count; i++)
+        {
+            LightSingularity singularity = p_singularities[i];
+            if (singularity == null || singularity.LightComponent == null ||
+                !singularity.LightComponent.enabled ||
+                !IslandLife_LightIsolation.SameArea(singularity, p_to))
+                continue;
+
+            float distance = Vector3.Distance(
+                singularity.transform.position, p_to.transform.position);
+            if (distance < best && distance < __instance.singularityMergeRange)
+            {
+                best = distance;
+                __result = singularity;
+            }
+        }
+    }
+}
+
+[HarmonyPatch(typeof(LightSingularityManager), "AreLightsInRangeAndInView",
+    new Type[] { typeof(Light), typeof(Light), typeof(float) })]
+internal static class IslandLife_LightMergeArea
+{
+    [HarmonyPrefix]
+    private static bool Prefix(Light p_from, Light p_to, ref bool __result)
+    {
+        if (p_from != null && p_to != null &&
+            !IslandLife_LightIsolation.SameArea(
+                p_from.transform, p_to.transform))
+        {
+            __result = false;
+            return false;
+        }
+
+        return true;
+    }
+}
+
+[HarmonyPatch(typeof(LightSingularityManager), "AreLightsInRangeAndInView",
+    new Type[] { typeof(Transform), typeof(Transform), typeof(float) })]
+internal static class IslandLife_LightConnectivityArea
+{
+    [HarmonyPrefix]
+    private static bool Prefix(Transform p_from, Transform p_to, ref bool __result)
+    {
+        if (p_from != null && p_to != null &&
+            !IslandLife_LightIsolation.SameArea(p_from, p_to))
+        {
+            __result = false;
+            return false;
+        }
+
+        return true;
+    }
+}
+
+[HarmonyPatch(typeof(LightSingularityManager), "RemoveLightSingularity")]
+internal static class IslandLife_LightReturnToPool
+{
+    [HarmonyPrefix]
+    private static void Prefix(LightSingularity p_lightSingularity)
+    {
+        if (p_lightSingularity == null)
+            return;
+
+        IslandLife_IslandLightFollower follower =
+            p_lightSingularity.GetComponent<IslandLife_IslandLightFollower>();
+        if (follower == null)
+            return;
+
+        follower.enabled = false;
+        GameManager manager = SingletonGeneric<GameManager>.Singleton;
+        if (manager != null && manager.lockedPivot != null)
+            p_lightSingularity.transform.SetParent(manager.lockedPivot, true);
     }
 }
