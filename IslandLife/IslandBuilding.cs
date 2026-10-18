@@ -25,6 +25,7 @@ public static class BlockCreator_Update_IslandLife
     private static readonly MethodInfo HandleRotationMethod = AccessTools.Method(typeof(BlockCreator), "HandleRotationOfSelectedBlock");
     private static readonly MethodInfo HandleMirroredMethod = AccessTools.Method(typeof(BlockCreator), "HandleMirroredVersion");
     private static readonly MethodInfo SetGhostPositionMethod = AccessTools.Method(typeof(BlockCreator), "SetGhostBlockPositionAndRotation");
+    private static readonly MethodInfo GetQuadAtCursorMethod = AccessTools.Method(typeof(BlockCreator), "GetQuadAtCursor");
 
     private const float GroundClearance = 0.001f;
     private const float MinGroundNormalY = 0.55f;
@@ -346,6 +347,40 @@ public static class BlockCreator_Update_IslandLife
         return false;
     }
 
+    private static bool HasVanillaRaftBuildTarget(BlockCreator creator, Network_Player player)
+    {
+        if (creator == null || player == null || GetQuadAtCursorMethod == null)
+            return false;
+
+        BlockQuad quad;
+        try
+        {
+            quad = GetQuadAtCursorMethod.Invoke(creator, null) as BlockQuad;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+
+        Block source = quad != null ? quad.ParentBlock : null;
+        if (source == null || source == creator.selectedBlock ||
+            source.GetComponent<IslandBlockTag>() != null)
+            return false;
+
+        // Поверхность острова перед плотом имеет приоритет
+        if (QuadHitField != null)
+        {
+            RaycastHit quadHit = (RaycastHit)QuadHitField.GetValue(creator);
+            RaycastHit islandHit;
+            Landmark landmark;
+            if (TryGetIslandTerrain(player, out islandHit, out landmark) &&
+                islandHit.distance + 0.02f < quadHit.distance)
+                return false;
+        }
+
+        return true;
+    }
+
     [HarmonyPrefix]
     public static bool Prefix(BlockCreator __instance, Item_Base ___selectedBuildableItem, Network_Player ___playerNetwork)
     {
@@ -354,11 +389,19 @@ public static class BlockCreator_Update_IslandLife
 
         if (___selectedBuildableItem == null)
         {
-            ReleaseMouseLookLock();
+            ResetHeightAdjustment();
             return true;
         }
 
-        IslandGridMode.HandleInput();
+        // Запрещённые для островов предметы обрабатываются самой игрой
+        if (!CanStartIslandBuild(___selectedBuildableItem))
+        {
+            if (heightCreator == __instance)
+                ResetHeightAdjustment();
+
+            RestoreGhostToRaftPivot(__instance);
+            return true;
+        }
 
         if (CanvasHelper.ActiveMenu != MenuType.None || MyInput.GetButtonDown("RMB") || MyInput.GetButtonUp("RMB"))
         {
@@ -366,6 +409,17 @@ public static class BlockCreator_Update_IslandLife
             return true;
         }
 
+        // При наведении на обычный плот островной режим полностью пропускается
+        if (HasVanillaRaftBuildTarget(__instance, ___playerNetwork))
+        {
+            if (heightCreator == __instance)
+                ResetHeightAdjustment();
+
+            RestoreGhostToRaftPivot(__instance);
+            return true;
+        }
+
+        IslandGridMode.HandleInput();
         TrackHeightSelection(__instance, ___selectedBuildableItem);
 
         if (IsAdjustmentKeyHeld() && lastIslandBuildFrame >= Time.frameCount - 1)
@@ -452,12 +506,6 @@ public static class BlockCreator_Update_IslandLife
 
                 return false;
             }
-        }
-
-        if (!CanStartIslandBuild(___selectedBuildableItem))
-        {
-            RestoreGhostToRaftPivot(__instance);
-            return true;
         }
 
         RaycastHit terrainHit;
