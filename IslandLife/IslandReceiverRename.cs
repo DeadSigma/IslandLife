@@ -10,6 +10,10 @@ public static class IslandReceiverRenameWindow
 {
     private static GameObject panel;
     private static InputField input;
+    private static Text titleText;
+    private static Text placeholderText;
+    private static Text actionsText;
+    private static int languageVersion = -1;
     private static Reciever targetReciever;
     private static string targetReceiverId;
 
@@ -52,12 +56,16 @@ public static class IslandReceiverRenameWindow
             return;
         }
 
+        RefreshLocalization();
+
         targetReciever =
             reciever;
 
         targetReceiverId = receiverId;
 
-        input.text = IslandReceiverTracking.GetName(receiverId);
+        string receiverName = IslandReceiverTracking.GetName(receiverId);
+        input.text = receiverName == "Island"
+            ? IslandLifeLocalization.Get("default_island") : receiverName;
 
         input.characterLimit =
             IslandReceiverTracking.MaxNameLength;
@@ -141,6 +149,9 @@ public static class IslandReceiverRenameWindow
         {
             return;
         }
+
+        if (languageVersion != IslandLifeLocalization.Version)
+            RefreshLocalization();
 
         Cursor.visible = true;
         Cursor.lockState =
@@ -294,6 +305,21 @@ public static class IslandReceiverRenameWindow
         input = null;
         targetReciever = null;
         targetReceiverId = null;
+        titleText = null;
+        placeholderText = null;
+        actionsText = null;
+        languageVersion = -1;
+    }
+
+    private static void RefreshLocalization()
+    {
+        languageVersion = IslandLifeLocalization.Version;
+        if (titleText != null)
+            titleText.text = IslandLifeLocalization.Get("receiver_name_title");
+        if (placeholderText != null)
+            placeholderText.text = IslandLifeLocalization.Get("receiver_name_placeholder");
+        if (actionsText != null)
+            actionsText.text = IslandLifeLocalization.Get("receiver_name_actions");
     }
 
     public static void CloseIfReceiver(
@@ -385,10 +411,10 @@ public static class IslandReceiverRenameWindow
                 0.96f
             );
 
-        CreateText(
+        titleText = CreateText(
             panel.transform,
             font,
-            "Island receiver name",
+            IslandLifeLocalization.Get("receiver_name_title"),
             24,
             new Vector2(0f, 52f),
             new Vector2(430f, 36f),
@@ -468,12 +494,14 @@ public static class IslandReceiverRenameWindow
                 inputFont != null
                     ? inputFont
                     : font,
-                "Enter island receiver name",
+                IslandLifeLocalization.Get("receiver_name_placeholder"),
                 20,
                 Vector2.zero,
                 new Vector2(370f, 42f),
                 TextAnchor.MiddleLeft
             );
+
+        placeholderText = placeholder;
 
         placeholder.fontStyle =
             FontStyle.Normal;
@@ -504,16 +532,17 @@ public static class IslandReceiverRenameWindow
         input.characterLimit =
             IslandReceiverTracking.MaxNameLength;
 
-        CreateText(
+        actionsText = CreateText(
             panel.transform,
             font,
-            "Enter - Save     Esc - Cancel",
+            IslandLifeLocalization.Get("receiver_name_actions"),
             16,
             new Vector2(0f, -52f),
             new Vector2(430f, 30f),
             TextAnchor.MiddleCenter
         );
 
+        languageVersion = IslandLifeLocalization.Version;
         panel.SetActive(false);
     }
 
@@ -776,20 +805,16 @@ public static class Reciever_OnIsRayed_IslandRename
             canvas.displayTextManager != null)
         {
             canvas.displayTextManager.ShowText(
-                "Set receiver name",
-                "N",
-                KeyCode.N,
+                IslandLifeLocalization.Get("receiver_name_prompt"),
+                IslandLifeHotkeys.Display("rename"),
+                IslandLifeHotkeys.Primary("rename"),
                 1,
                 0,
                 false
             );
         }
 
-        Keyboard keyboard =
-            Keyboard.current;
-
-        if (keyboard != null &&
-            keyboard.nKey.wasPressedThisFrame)
+        if (IslandLifeHotkeys.Down("rename"))
         {
             IslandReceiverRenameWindow.Open(
                 __instance

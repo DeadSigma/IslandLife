@@ -19,7 +19,7 @@ public static class IslandGridMode
         if (CanvasHelper.ActiveMenu != MenuType.None || lastToggleFrame == Time.frameCount)
             return;
 
-        if (!Input.GetKeyDown(KeyCode.G))
+        if (!IslandLifeHotkeys.Down("grid"))
             return;
 
         Enabled = !Enabled;
@@ -42,16 +42,16 @@ public static class IslandGridMode
 
         string[] hints =
         {
-            Enabled ? "[G] Disable island grid" : "[G] Enable island grid",
-            "[R + Mouse] Rotate",
-            "[Alt + Mouse / Scroll] Height",
-            "[X + Mouse / Scroll] Tilt X",
-            "[Z + Mouse / Scroll] Tilt Z",
-            "[Ctrl + R] Reset transform",
-            "[Shift] Align to terrain"
+            "[" + IslandLifeHotkeys.Display("grid") + "] " + IslandLifeLocalization.Get(Enabled ? "hint_grid_disable" : "hint_grid_enable"),
+            "[" + IslandLifeHotkeys.GameRotateDisplay() + " + " + IslandLifeLocalization.Get("hint_mouse") + "] " + IslandLifeLocalization.Get("hint_rotate"),
+            "[" + IslandLifeHotkeys.Display("height") + " + " + IslandLifeLocalization.Get("hint_mouse") + " / " + IslandLifeLocalization.Get("hint_scroll") + "] " + IslandLifeLocalization.Get("hint_height"),
+            "[" + IslandLifeHotkeys.Display("tilt_x") + " + " + IslandLifeLocalization.Get("hint_mouse") + " / " + IslandLifeLocalization.Get("hint_scroll") + "] " + IslandLifeLocalization.Get("hint_tilt_x"),
+            "[" + IslandLifeHotkeys.Display("tilt_z") + " + " + IslandLifeLocalization.Get("hint_mouse") + " / " + IslandLifeLocalization.Get("hint_scroll") + "] " + IslandLifeLocalization.Get("hint_tilt_z"),
+            "[" + IslandLifeHotkeys.Display("reset_modifier") + " + " + IslandLifeHotkeys.Display("reset") + "] " + IslandLifeLocalization.Get("hint_reset"),
+            "[" + IslandLifeHotkeys.Display("align") + "] " + IslandLifeLocalization.Get("hint_align")
         };
 
-        const float width = 292f;
+        const float width = 410f;
         const float paddingX = 14f;
         const float paddingY = 11f;
         const float rowHeight = 19f;

@@ -27,6 +27,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<Reference Include="System.Runtime.Serialization" />
 		<Reference Include="Assembly-CSharp">
 			<HintPath>$(RmlPublicizedDir)\Assembly-CSharp.dll</HintPath>
 			<Private>false</Private>

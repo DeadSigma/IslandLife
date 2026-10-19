@@ -1082,7 +1082,7 @@ public static class IslandReceiverTracking
         text.horizontalOverflow = HorizontalWrapMode.Overflow;
         text.verticalOverflow = VerticalWrapMode.Overflow;
         text.raycastTarget = false;
-        text.text = "Island";
+        text.text = IslandLifeLocalization.Get("default_island");
 
         RectTransform rect = text.rectTransform;
         rect.anchorMin = new Vector2(0.5f, 0.5f);
@@ -1105,7 +1105,18 @@ public static class IslandReceiverTracking
         if (text == null)
             return;
 
-        name = string.IsNullOrEmpty(name) ? "Island" : name;
+        name = string.IsNullOrEmpty(name) || name == "Island"
+            ? IslandLifeLocalization.Get("default_island") : name;
+        if (name == "Raft")
+            name = IslandLifeLocalization.Get("default_raft");
+        else if (name == "Main Raft")
+            name = IslandLifeLocalization.Get("default_main_raft");
+        else if (name.StartsWith("Raft ", StringComparison.Ordinal))
+        {
+            int raftNumber;
+            if (int.TryParse(name.Substring(5), out raftNumber))
+                name = IslandLifeLocalization.Get("default_raft") + " " + raftNumber;
+        }
         if (text.text == name)
             return;
 

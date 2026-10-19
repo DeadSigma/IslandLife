@@ -16,6 +16,10 @@ public class IslandLife : Mod
 
     public void Awake()
     {
+        IslandLifeLocalization.Initialize(
+            GetEmbeddedFileBytes("lang/eng.json"),
+            GetEmbeddedFileBytes("lang/ru.json"));
+        IslandLifeHotkeys.Initialize();
         harmony = new Harmony("el_neuman.islandlife");
         harmony.PatchAll();
         IslandReceiverTracking.InitializeNetworking(this, harmony);
@@ -24,6 +28,8 @@ public class IslandLife : Mod
 
     public void Update()
     {
+        IslandLifeLocalization.Update();
+        IslandLifeHotkeys.Update();
         IslandReceiverTracking.Update();
         IslandReceiverRenameWindow.Update();
     }
@@ -36,6 +42,8 @@ public class IslandLife : Mod
     public void OnModUnload()
     {
         BlockCreator_Update_IslandLife.ResetHeightAdjustment();
+        IslandLifeHotkeys.Reset();
+        IslandLifeLocalization.Reset();
         IslandReceiverRenameWindow.Reset();
         IslandLifeStorage.SaveCurrentWorld();
         IslandReceiverTracking.Save();

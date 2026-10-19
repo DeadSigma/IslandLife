@@ -55,29 +55,28 @@ public static class BlockCreator_Update_IslandLife
 
     private static bool IsHeightKeyHeld()
     {
-        return Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+        return IslandLifeHotkeys.Held("height");
     }
 
     private static bool IsResetModifierHeld()
     {
-        return Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+        return IslandLifeHotkeys.Held("reset_modifier");
     }
 
     private static bool ResetShortcutPressed()
     {
-        return (IsResetModifierHeld() && Input.GetKeyDown(KeyCode.R)) ||
-               (Input.GetKey(KeyCode.R) &&
-                (Input.GetKeyDown(KeyCode.LeftControl) || Input.GetKeyDown(KeyCode.RightControl)));
+        return (IsResetModifierHeld() && IslandLifeHotkeys.Down("reset")) ||
+               (IslandLifeHotkeys.Held("reset") && IslandLifeHotkeys.Down("reset_modifier"));
     }
 
     private static bool IsTiltXHeld()
     {
-        return Input.GetKey(KeyCode.X);
+        return IslandLifeHotkeys.Held("tilt_x");
     }
 
     private static bool IsTiltZHeld()
     {
-        return Input.GetKey(KeyCode.Z);
+        return IslandLifeHotkeys.Held("tilt_z");
     }
 
     private static bool IsAdjustmentKeyHeld()
@@ -129,7 +128,7 @@ public static class BlockCreator_Update_IslandLife
             ReleaseMouseLookLock();
 
         // Игра может включить обзор после отпускания R - блокировка восстанавливается
-        if (mouseLookLockedPlayer != player || Input.GetKeyUp(KeyCode.R))
+        if (mouseLookLockedPlayer != player || IslandLifeHotkeys.GameRotateReleased())
             player.PlayerScript.SetMouseLookScripts(false);
 
         mouseLookLockedPlayer = player;
@@ -592,7 +591,7 @@ public static class BlockCreator_Update_IslandLife
 
         if (suppressVanillaRotation)
         {
-            if (!Input.GetKey(KeyCode.R))
+            if (!IslandLifeHotkeys.Held("reset"))
                 suppressVanillaRotation = false;
             return;
         }
@@ -1273,7 +1272,7 @@ public static class BlockCreator_Update_IslandLife
 
     private static bool IsTerrainAlignHeld()
     {
-        return Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+        return IslandLifeHotkeys.Held("align");
     }
 
     private static bool TryGetVirtualGridFrame(
